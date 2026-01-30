@@ -5,7 +5,7 @@
 
 #define MyAppName "NeoRecorder"
 #define MyAppVersion "1.1.0"
-#define MyAppPublisher "Antigravity Cybernetics"
+#define MyAppPublisher "DimSimd"
 #define MyAppURL "https://github.com/DimSimd2020/NeoRecorder"
 #define MyAppExeName "NeoRecorder.exe"
 
@@ -21,6 +21,7 @@ AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
+LicenseFile=LICENSE
 OutputDir=setup
 OutputBaseFilename=NeoRecorder_Setup_v{#MyAppVersion}
 SetupIconFile=app_icon.ico
@@ -28,7 +29,6 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
 DisableWelcomePage=no
-LicenseFile=
 PrivilegesRequired=admin
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ArchitecturesInstallIn64BitMode=x64
@@ -46,8 +46,8 @@ Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescrip
 ; Main executable
 Source: "dist\NeoRecorder.exe"; DestDir: "{app}"; Flags: ignoreversion
 
-; FFmpeg (if bundled separately - for development use --onedir)
-; Source: "ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion; Check: FileExists('ffmpeg.exe')
+; FFmpeg binary (critical for app functionality)
+Source: "ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion; Check: FileExists('ffmpeg.exe')
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -70,6 +70,13 @@ begin
   if not IsWin64 then
   begin
     MsgBox('NeoRecorder requires 64-bit Windows 10 or later.', mbError, MB_OK);
+    Result := False;
+  end;
+  
+  // Check if FFmpeg exists
+  if not FileExists(ExpandConstant('{src}\ffmpeg.exe')) then
+  begin
+    MsgBox('FFmpeg.exe not found in the installer directory. Please download FFmpeg from https://ffmpeg.org/download.html and place it in the same folder as this installer.', mbError, MB_OK);
     Result := False;
   end;
 end;

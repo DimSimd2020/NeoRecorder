@@ -96,8 +96,8 @@ NeoRecorder/
 
 ## 📄 Лицензия
 
-MIT License
+Apache License 2.0 — см. [LICENSE](LICENSE)
 
 ## 👤 Автор
 
-Antigravity Cybernetics
+**DimSimd** — https://github.com/DimSimd2020
