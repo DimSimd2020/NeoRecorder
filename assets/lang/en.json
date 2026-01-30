@@ -1,0 +1,23 @@
+{
+    "app_title": "NeoRecorder",
+    "mode_screen": "Screen",
+    "mode_region": "Region",
+    "mode_window": "Window",
+    "mic_source": "Microphone",
+    "system_source": "System Audio",
+    "rec_start": "REC",
+    "rec_stop": "STOP",
+    "settings": "Settings",
+    "folder": "Recordings",
+    "select_window": "Select Window",
+    "no_windows": "No active windows",
+    "saving": "Saving...",
+    "fps": "Frame Rate",
+    "quality": "Quality",
+    "encoder": "Encoder",
+    "output_path": "Save Path",
+    "browse": "Browse",
+    "recording_saved": "Recording Saved",
+    "notification_title": "NeoRecorder",
+    "open_folder": "Open Folder"
+}

@@ -1,0 +1,391 @@
+
+import json
+import os
+import threading
+import time
+import customtkinter as ctk
+from PIL import Image
+from config import *
+from core.audio_manager import AudioManager
+from core.window_finder import WindowFinder
+from core.recorder import ScreenRecorder
+from gui.widgets import VUMeter
+from gui.overlay import RegionOverlay
+from gui.recording_widget import RecordingWidget
+from utils.notifications import show_recording_complete
+
+class SettingsWindow(ctk.CTkToplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
+        self.title(parent.t("settings"))
+        self.geometry("450x500")
+        self.configure(fg_color=BG_COLOR)
+        self.attributes("-topmost", True)
+        
+        self.setup_ui()
+
+    def setup_ui(self):
+        # Title
+        ctk.CTkLabel(self, text=self.parent.t("settings"), 
+                    font=("Segoe UI", 22, "bold"), 
+                    text_color=NEON_BLUE).pack(pady=20)
+        
+        # Main scrollable frame
+        self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.main_frame.pack(fill="both", expand=True, padx=20, pady=10)
+        
+        # === Language Section ===
+        lang_frame = ctk.CTkFrame(self.main_frame, fg_color="#333333", corner_radius=10)
+        lang_frame.pack(fill="x", pady=10)
+        
+        ctk.CTkLabel(lang_frame, text="Language / Язык:", 
+                    font=("Segoe UI", 12, "bold")).pack(pady=10, padx=15, anchor="w")
+        self.lang_combo = ctk.CTkComboBox(lang_frame, values=["ru", "en"], 
+                                          width=200, command=self.change_lang)
+        self.lang_combo.set(self.parent.current_lang)
+        self.lang_combo.pack(pady=(0, 15), padx=15, anchor="w")
+
+        # === Output Path Section ===
+        path_frame = ctk.CTkFrame(self.main_frame, fg_color="#333333", corner_radius=10)
+        path_frame.pack(fill="x", pady=10)
+        
+        ctk.CTkLabel(path_frame, text=self.parent.t("output_path") + ":", 
+                    font=("Segoe UI", 12, "bold")).pack(pady=10, padx=15, anchor="w")
+        
+        path_row = ctk.CTkFrame(path_frame, fg_color="transparent")
+        path_row.pack(fill="x", padx=15, pady=(0, 15))
+        
+        self.path_entry = ctk.CTkEntry(path_row, width=320, height=35)
+        self.path_entry.insert(0, self.parent.recorder.get_output_dir())
+        self.path_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        
+        self.browse_btn = ctk.CTkButton(path_row, text=self.parent.t("browse"), 
+                                        width=80, height=35, command=self.browse_path)
+        self.browse_btn.pack(side="right")
+
+        # === Recording Settings Section ===
+        rec_frame = ctk.CTkFrame(self.main_frame, fg_color="#333333", corner_radius=10)
+        rec_frame.pack(fill="x", pady=10)
+        
+        ctk.CTkLabel(rec_frame, text=self.parent.t("fps") + ":", 
+                    font=("Segoe UI", 12, "bold")).pack(pady=10, padx=15, anchor="w")
+        
+        fps_values = [str(f) for f in FPS_OPTIONS]
+        self.fps_combo = ctk.CTkComboBox(rec_frame, values=fps_values, width=200)
+        self.fps_combo.set(str(self.parent.current_fps))
+        self.fps_combo.pack(pady=(0, 10), padx=15, anchor="w")
+        
+        ctk.CTkLabel(rec_frame, text=self.parent.t("quality") + ":", 
+                    font=("Segoe UI", 12, "bold")).pack(pady=10, padx=15, anchor="w")
+        
+        lang_key = "label_ru" if self.parent.current_lang == "ru" else "label_en"
+        quality_labels = [QUALITY_PRESETS[k][lang_key] for k in QUALITY_PRESETS]
+        self.quality_keys = list(QUALITY_PRESETS.keys())
+        
+        self.quality_combo = ctk.CTkComboBox(rec_frame, values=quality_labels, width=200)
+        current_idx = self.quality_keys.index(self.parent.current_quality)
+        self.quality_combo.set(quality_labels[current_idx])
+        self.quality_combo.pack(pady=(0, 10), padx=15, anchor="w")
+        
+        # Encoder info
+        encoder = self.parent.recorder.get_best_encoder()
+        encoder_label = "GPU (NVENC)" if "nvenc" in encoder else \
+                       "GPU (QuickSync)" if "qsv" in encoder else \
+                       "GPU (AMF)" if "amf" in encoder else "CPU (x264)"
+        
+        ctk.CTkLabel(rec_frame, text=f"{self.parent.t('encoder')}: {encoder_label}", 
+                    font=("Segoe UI", 11), text_color=SECONDARY_TEXT_COLOR).pack(pady=(5, 15), padx=15, anchor="w")
+
+        # === Save Button ===
+        save_btn = ctk.CTkButton(self, text="OK", width=120, height=40, 
+                                 fg_color=ACCENT_COLOR, command=self.save_and_close)
+        save_btn.pack(pady=20)
+
+    def browse_path(self):
+        new_path = ctk.filedialog.askdirectory(initialdir=self.parent.recorder.get_output_dir())
+        if new_path:
+            self.parent.recorder.set_output_dir(new_path)
+            self.path_entry.delete(0, "end")
+            self.path_entry.insert(0, new_path)
+
+    def change_lang(self, new_lang):
+        self.parent.change_language(new_lang)
+        self.destroy()
+
+    def save_and_close(self):
+        # Save FPS
+        try:
+            fps = int(self.fps_combo.get())
+            self.parent.current_fps = fps
+            self.parent.recorder.set_fps(fps)
+        except ValueError:
+            pass
+        
+        # Save Quality
+        lang_key = "label_ru" if self.parent.current_lang == "ru" else "label_en"
+        selected_label = self.quality_combo.get()
+        for key, preset in QUALITY_PRESETS.items():
+            if preset[lang_key] == selected_label:
+                self.parent.current_quality = key
+                self.parent.recorder.set_quality(key)
+                break
+        
+        # Save path
+        new_path = self.path_entry.get()
+        if new_path and os.path.exists(new_path):
+            self.parent.recorder.set_output_dir(new_path)
+        
+        self.destroy()
+
+class NeoRecorderApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+
+        self.title(APP_NAME)
+        self.geometry("420x600")
+        self.configure(fg_color=BG_COLOR)
+        
+        self.lang_data = self.load_lang(DEFAULT_LANG)
+        self.audio_manager = AudioManager()
+        self.window_finder = WindowFinder()
+        self.recorder = ScreenRecorder()
+        
+        self.current_lang = DEFAULT_LANG
+        self.current_fps = DEFAULT_FPS
+        self.current_quality = DEFAULT_QUALITY
+        self.recording_mode = "screen"  # screen, region, window
+        self.selected_rect = None
+        self.selected_window_hwnd = None
+        
+        self.setup_ui()
+        self.update_vu_meter()
+
+    def load_lang(self, lang):
+        path = os.path.join(LANG_DIR, f"{lang}.json")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading language: {e}")
+            return {}
+
+    def t(self, key):
+        return self.lang_data.get(key, key)
+
+    def change_language(self, lang):
+        self.current_lang = lang
+        self.lang_data = self.load_lang(lang)
+        # Refresh UI
+        for widget in self.winfo_children():
+            widget.destroy()
+        self.setup_ui()
+
+    def open_settings(self):
+        SettingsWindow(self)
+
+    def setup_ui(self):
+        # Load Icons
+        self.icon_rec = ctk.CTkImage(Image.open(os.path.join(ICONS_DIR, "rec.png")), size=(80, 80))
+        self.icon_stop = ctk.CTkImage(Image.open(os.path.join(ICONS_DIR, "stop.png")), size=(80, 80))
+        self.icon_folder = ctk.CTkImage(Image.open(os.path.join(ICONS_DIR, "folder.png")), size=(30, 30))
+        self.icon_settings = ctk.CTkImage(Image.open(os.path.join(ICONS_DIR, "settings.png")), size=(30, 30))
+
+        # Header
+        self.header = ctk.CTkLabel(self, text=self.t("app_title"), 
+                                   font=("Segoe UI", 28, "bold"), text_color=NEON_BLUE)
+        self.header.pack(pady=20)
+
+        # Mode Selection
+        self.mode_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.mode_frame.pack(pady=10)
+        
+        self.btn_screen = ctk.CTkButton(self.mode_frame, text=self.t("mode_screen"), 
+                                        width=100, command=lambda: self.set_mode("screen"))
+        self.btn_screen.grid(row=0, column=0, padx=5)
+        
+        self.btn_region = ctk.CTkButton(self.mode_frame, text=self.t("mode_region"), 
+                                        width=100, command=self.select_region)
+        self.btn_region.grid(row=0, column=1, padx=5)
+        
+        self.btn_window = ctk.CTkButton(self.mode_frame, text=self.t("mode_window"), 
+                                        width=100, command=self.show_window_selector)
+        self.btn_window.grid(row=0, column=2, padx=5)
+
+        # Window Selection Dropdown (hidden by default)
+        self.window_combo = ctk.CTkComboBox(self, width=380, command=self.on_window_selected)
+        self.window_combo.pack(pady=5)
+        self.window_combo.pack_forget()
+
+        # FPS/Quality indicator
+        self.status_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.status_frame.pack(pady=5)
+        
+        encoder = self.recorder.get_best_encoder()
+        encoder_short = "NVENC" if "nvenc" in encoder else \
+                       "QSV" if "qsv" in encoder else \
+                       "AMF" if "amf" in encoder else "CPU"
+        
+        self.fps_label = ctk.CTkLabel(self.status_frame, 
+                                      text=f"{self.current_fps} FPS | {encoder_short}", 
+                                      font=("Segoe UI", 11), text_color=SECONDARY_TEXT_COLOR)
+        self.fps_label.pack()
+
+        # Audio Section
+        self.audio_frame = ctk.CTkFrame(self, fg_color="#333333", corner_radius=10)
+        self.audio_frame.pack(pady=20, padx=20, fill="x")
+        
+        self.mic_switch = ctk.CTkSwitch(self.audio_frame, text=self.t("mic_source"), 
+                                        progress_color=NEON_BLUE)
+        self.mic_switch.pack(pady=10, padx=10, anchor="w")
+        
+        self.devices = self.audio_manager.get_input_devices()
+        self.device_names = [d['name'] for d in self.devices]
+        self.device_combo = ctk.CTkComboBox(self.audio_frame, values=self.device_names, width=340)
+        self.device_combo.pack(pady=5, padx=10)
+        if self.device_names:
+            self.device_combo.set(self.device_names[0])
+            self.audio_manager.start_monitoring(self.devices[0]['index'])
+        
+        self.vu_meter = VUMeter(self.audio_frame, width=360, height=8)
+        self.vu_meter.pack(pady=10, padx=10)
+
+        self.sys_audio_switch = ctk.CTkSwitch(self.audio_frame, text=self.t("system_source"), 
+                                              progress_color=NEON_BLUE)
+        self.sys_audio_switch.pack(pady=10, padx=10, anchor="w")
+
+        # Record Button
+        self.rec_btn = ctk.CTkButton(self, text="", image=self.icon_rec,
+                                     fg_color="transparent", hover_color="#333333",
+                                     width=120, height=120, corner_radius=60,
+                                     command=self.toggle_record)
+        self.rec_btn.pack(pady=30)
+
+        # Bottom Buttons
+        self.bottom_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.bottom_frame.pack(fill="x", side="bottom", pady=10)
+        
+        self.btn_folder = ctk.CTkButton(self.bottom_frame, text="", image=self.icon_folder, 
+                                        width=40, command=self.open_folder, fg_color="transparent")
+        self.btn_folder.pack(side="left", padx=20)
+        
+        self.timer_label = ctk.CTkLabel(self.bottom_frame, text="00:00:00", font=("Consolas", 18))
+        self.timer_label.pack(side="left", expand=True)
+        
+        self.btn_settings = ctk.CTkButton(self.bottom_frame, text="", image=self.icon_settings, 
+                                          width=40, fg_color="transparent", command=self.open_settings)
+        self.btn_settings.pack(side="right", padx=20)
+
+    def set_mode(self, mode):
+        self.recording_mode = mode
+        self.window_combo.pack_forget()
+        self.selected_rect = None
+        
+        # Update button styles to show selected mode
+        default_color = "#1F6AA5"
+        selected_color = NEON_BLUE
+        
+        self.btn_screen.configure(fg_color=selected_color if mode == "screen" else default_color)
+        self.btn_region.configure(fg_color=selected_color if mode == "region" else default_color)
+        self.btn_window.configure(fg_color=selected_color if mode == "window" else default_color)
+
+    def select_region(self):
+        self.set_mode("region")
+        overlay = RegionOverlay(self.on_region_selected)
+        overlay.grab_set()
+
+    def on_region_selected(self, rect):
+        self.selected_rect = rect
+
+    def show_window_selector(self):
+        self.set_mode("window")
+        self.active_windows = self.window_finder.get_active_windows()
+        titles = [w['title'] for w in self.active_windows]
+        if titles:
+            self.window_combo.configure(values=titles)
+            self.window_combo.set(titles[0])
+            self.window_combo.pack(pady=5, after=self.mode_frame)
+            self.on_window_selected(titles[0])
+        else:
+            self.window_combo.configure(values=[self.t("no_windows")])
+            self.window_combo.set(self.t("no_windows"))
+
+    def on_window_selected(self, title):
+        for w in self.active_windows:
+            if w['title'] == title:
+                self.selected_window_hwnd = w['hwnd']
+                self.selected_rect = self.window_finder.get_window_rect(self.selected_window_hwnd)
+                break
+
+    def toggle_record(self):
+        if not self.recorder.is_recording:
+            self.start_recording()
+        else:
+            self.stop_recording()
+
+    def start_recording(self):
+        self.rec_btn.configure(image=self.icon_stop, fg_color="#333333")
+        
+        mic_name = self.device_combo.get() if self.mic_switch.get() else None
+        system_audio = self.sys_audio_switch.get()
+        
+        # Hide main window
+        self.withdraw()
+        
+        # Show floating widget
+        self.widget = RecordingWidget(self, on_stop=self.stop_recording, on_pause=self.on_pause_recording)
+        
+        self.recorder.start(mode=self.recording_mode, rect=self.selected_rect, 
+                           mic=mic_name, system=system_audio)
+        self.start_time = time.time()
+        self.update_timer()
+
+    def on_pause_recording(self, is_paused):
+        pass  # Pause not fully supported with current FFmpeg approach
+
+    def stop_recording(self):
+        if hasattr(self, 'widget') and self.widget:
+            self.widget.destroy()
+            self.widget = None
+        
+        # Get recording metadata before stopping
+        result = self.recorder.stop()
+        
+        self.deiconify()  # Bring back main window
+        
+        self.rec_btn.configure(image=self.icon_rec, fg_color="transparent")
+        self.timer_label.configure(text="00:00:00")
+        
+        # Show notification
+        if result:
+            show_recording_complete(
+                filename=result.get("filename", "recording"),
+                path=result.get("path", ""),
+                duration=result.get("duration_formatted", "00:00")
+            )
+
+    def update_timer(self):
+        if self.recorder.is_recording:
+            elapsed = int(time.time() - self.start_time)
+            mins, secs = divmod(elapsed, 60)
+            hrs, mins = divmod(mins, 60)
+            self.timer_label.configure(text=f"{hrs:02d}:{mins:02d}:{secs:02d}")
+            self.after(1000, self.update_timer)
+
+    def update_vu_meter(self):
+        level = self.audio_manager.get_vu_level()
+        self.vu_meter.set_level(level)
+        self.after(50, self.update_vu_meter)
+
+    def open_folder(self):
+        os.startfile(self.recorder.get_output_dir())
+
+    def on_closing(self):
+        self.audio_manager.stop_monitoring()
+        self.recorder.stop()
+        self.destroy()
+
+if __name__ == "__main__":
+    app = NeoRecorderApp()
+    app.protocol("WM_DELETE_WINDOW", app.on_closing)
+    app.mainloop()

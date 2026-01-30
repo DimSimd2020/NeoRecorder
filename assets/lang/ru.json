@@ -1,0 +1,23 @@
+{
+    "app_title": "NeoRecorder",
+    "mode_screen": "Экран",
+    "mode_region": "Область",
+    "mode_window": "Окно",
+    "mic_source": "Микрофон",
+    "system_source": "Системные звуки",
+    "rec_start": "REC",
+    "rec_stop": "СТОП",
+    "settings": "Настройки",
+    "folder": "Папка записей",
+    "select_window": "Выберите окно",
+    "no_windows": "Нет активных окон",
+    "saving": "Сохранение...",
+    "fps": "Частота кадров",
+    "quality": "Качество",
+    "encoder": "Кодек",
+    "output_path": "Путь сохранения",
+    "browse": "Обзор",
+    "recording_saved": "Запись сохранена",
+    "notification_title": "NeoRecorder",
+    "open_folder": "Открыть папку"
+}

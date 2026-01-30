@@ -1,0 +1,52 @@
+# Build artifacts
+build/
+dist/
+*.spec
+setup/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+*.egg
+
+# FFmpeg binary (too large for GitHub)
+ffmpeg.exe
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config
+.env
+*.local
+
+# Recording output (don't commit test recordings)
+*.mp4
+*.mkv
+*.avi
+*.mov
+
+# PyInstaller temp
+*.manifest
+*.pem
