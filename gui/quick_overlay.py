@@ -1,13 +1,14 @@
 """
 Quick Capture Overlay for NeoRecorder.
 Floating toolbar with Screenshot/Recording modes (like Windows Snipping Tool).
+Rewritten for stability.
 """
 
 import customtkinter as ctk
 import tkinter as tk
 from typing import Callable, Optional, Tuple
 import ctypes
-from PIL import Image
+from PIL import Image, ImageGrab, ImageTk
 from config import NEON_BLUE, BG_COLOR, ICONS_DIR
 import os
 
@@ -163,7 +164,11 @@ class QuickOverlay(ctk.CTkToplevel):
         # Hide toolbar during selection
         self.withdraw()
         
-        # Create fullscreen selection overlay
+        # Small delay to let window hide
+        self.after(50, self._create_selection_overlay)
+    
+    def _create_selection_overlay(self):
+        """Create the selection overlay after delay"""
         self.selection_overlay = SelectionOverlay(
             on_select=self._on_region_selected,
             on_cancel=self._on_selection_cancelled
@@ -184,6 +189,7 @@ class QuickOverlay(ctk.CTkToplevel):
         """Handle selection cancelled"""
         self.selection_overlay = None
         self.deiconify()  # Show toolbar again
+        self.focus_force()
     
     def _close(self):
         """Close overlay"""
@@ -196,7 +202,10 @@ class QuickOverlay(ctk.CTkToplevel):
         if self.on_close:
             self.on_close()
         
-        self.destroy()
+        try:
+            self.destroy()
+        except:
+            pass
     
     def _start_drag(self, event):
         self._drag_x = event.x
@@ -208,10 +217,11 @@ class QuickOverlay(ctk.CTkToplevel):
         self.geometry(f"+{x}+{y}")
 
 
-class SelectionOverlay(tk.Toplevel):
+class SelectionOverlay(tk.Tk):
     """
     Fullscreen overlay for region selection.
-    Lightweight Tk (not CTk) for performance.
+    Uses separate Tk instance to avoid conflicts with main window.
+    Shows screenshot of current screen as background for smoother experience.
     """
     
     def __init__(
@@ -223,27 +233,56 @@ class SelectionOverlay(tk.Toplevel):
         
         self.on_select = on_select
         self.on_cancel = on_cancel
+        self._closed = False
         
-        # Fullscreen transparent overlay
-        self.attributes("-fullscreen", True)
-        self.attributes("-alpha", 0.3)
+        # Get screen dimensions
+        self.screen_width = self.winfo_screenwidth()
+        self.screen_height = self.winfo_screenheight()
+        
+        # Load settings
+        from config import settings
+        self.dim_screen = settings.get("overlay_dim_screen", True)
+        self.lock_input = settings.get("overlay_lock_input", True)
+        
+        # Take screenshot of current screen BEFORE showing overlay
+        try:
+            self.screenshot = ImageGrab.grab()
+            if self.dim_screen:
+                # Darken the screenshot
+                from PIL import ImageEnhance
+                enhancer = ImageEnhance.Brightness(self.screenshot)
+                self.screenshot = enhancer.enhance(0.4)  # 40% brightness
+        except:
+            self.screenshot = None
+        
+        # Window setup - borderless fullscreen
+        self.overrideredirect(True)
+        self.geometry(f"{self.screen_width}x{self.screen_height}+0+0")
         self.attributes("-topmost", True)
         self.configure(bg="black", cursor="cross")
         
-        # Canvas for drawing
+        # Create canvas
         self.canvas = tk.Canvas(
             self, 
+            width=self.screen_width,
+            height=self.screen_height,
             bg="black", 
             highlightthickness=0,
             cursor="cross"
         )
         self.canvas.pack(fill="both", expand=True)
         
+        # Set background image if we have screenshot
+        if self.screenshot:
+            self.bg_image = ImageTk.PhotoImage(self.screenshot)
+            self.canvas.create_image(0, 0, anchor="nw", image=self.bg_image, tags="bg")
+        
         # Selection state
         self.start_x = None
         self.start_y = None
         self.rect_id = None
-        self.dim_label = None
+        self.dim_rects = []  # For showing selection cutout
+        self.size_label_id = None
         
         # Bindings
         self.canvas.bind("<ButtonPress-1>", self._on_press)
@@ -251,62 +290,68 @@ class SelectionOverlay(tk.Toplevel):
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
         self.bind("<Escape>", lambda e: self._cancel())
         
-        # Lock input if requested
-        from config import settings
-        self.lock_input = settings.get("overlay_lock_input", True)
-        self.dim_screen = settings.get("overlay_dim_screen", True)
-        
-        if self.dim_screen:
-            self.attributes("-alpha", 0.3)
-        else:
-            self.attributes("-alpha", 0.01) # Almost transparent but captures clicks
-            
-        if self.lock_input:
-            self.grab_set() # Capture all events
-            self.focus_force()
-        
-        # Instructions
-        self.instructions = tk.Label(
-            self.canvas,
-            text="Выделите область. ESC для отмены.",
-            font=("Segoe UI", 14),
-            fg="white",
-            bg="black",
-            padx=15,
-            pady=8
+        # Instructions label
+        self.instructions_id = self.canvas.create_text(
+            self.screen_width // 2, 50,
+            text="Выделите область мышью. ESC — отмена.",
+            fill="white",
+            font=("Segoe UI", 16),
+            tags="ui"
         )
-        self.instructions.place(relx=0.5, rely=0.1, anchor="center")
+        
+        # Background for instructions
+        bbox = self.canvas.bbox(self.instructions_id)
+        if bbox:
+            self.canvas.create_rectangle(
+                bbox[0] - 15, bbox[1] - 8,
+                bbox[2] + 15, bbox[3] + 8,
+                fill="#1a1a1a",
+                outline="#444",
+                tags="ui"
+            )
+            self.canvas.tag_raise(self.instructions_id)
+        
+        # Lock input
+        if self.lock_input:
+            self.grab_set_global()
         
         self.focus_force()
+        self.lift()
     
     def _on_press(self, event):
-        self.start_x = self.winfo_pointerx()
-        self.start_y = self.winfo_pointery()
-        self.instructions.place_forget()
+        """Mouse button pressed - start selection"""
+        self.start_x = event.x
+        self.start_y = event.y
         
-        # Create rectangle
+        # Hide instructions
+        self.canvas.delete("ui")
+        
+        # Create selection rectangle
         self.rect_id = self.canvas.create_rectangle(
             self.start_x, self.start_y,
             self.start_x, self.start_y,
             outline="#00F2FF",
-            width=2
+            width=2,
+            tags="selection"
         )
         
-        # Dimension label
-        self.dim_label = tk.Label(
-            self.canvas,
-            text="0 x 0",
-            font=("Consolas", 11),
-            fg="#00F2FF",
-            bg="black"
+        # Create size label
+        self.size_label_id = self.canvas.create_text(
+            self.start_x + 10, self.start_y - 20,
+            text="0 × 0",
+            fill="#00F2FF",
+            font=("Consolas", 12),
+            anchor="nw",
+            tags="selection"
         )
     
     def _on_drag(self, event):
+        """Mouse dragging - update selection"""
         if self.start_x is None:
             return
         
-        cur_x = self.winfo_pointerx()
-        cur_y = self.winfo_pointery()
+        cur_x = event.x
+        cur_y = event.y
         
         # Update rectangle
         self.canvas.coords(
@@ -315,21 +360,32 @@ class SelectionOverlay(tk.Toplevel):
             cur_x, cur_y
         )
         
-        # Update dimensions
+        # Calculate dimensions
         w = abs(cur_x - self.start_x)
         h = abs(cur_y - self.start_y)
-        self.dim_label.configure(text=f"{w} × {h}")
-        self.dim_label.place(x=cur_x + 10, y=cur_y + 10)
+        
+        # Update size label position and text
+        label_x = max(cur_x, self.start_x) + 10
+        label_y = min(cur_y, self.start_y) - 25
+        if label_y < 10:
+            label_y = max(cur_y, self.start_y) + 10
+        
+        self.canvas.coords(self.size_label_id, label_x, label_y)
+        self.canvas.itemconfig(self.size_label_id, text=f"{w} × {h}")
     
     def _on_release(self, event):
+        """Mouse released - finish selection"""
+        if self._closed:
+            return
+            
         if self.start_x is None:
             self._cancel()
             return
         
-        end_x = self.winfo_pointerx()
-        end_y = self.winfo_pointery()
+        end_x = event.x
+        end_y = event.y
         
-        # Normalize
+        # Normalize coordinates
         x1 = min(self.start_x, end_x)
         y1 = min(self.start_y, end_y)
         x2 = max(self.start_x, end_x)
@@ -337,11 +393,28 @@ class SelectionOverlay(tk.Toplevel):
         
         # Minimum size check
         if (x2 - x1) > 10 and (y2 - y1) > 10:
-            self.destroy()
+            self._closed = True
+            self._cleanup()
             self.on_select((x1, y1, x2, y2))
         else:
             self._cancel()
     
     def _cancel(self):
-        self.destroy()
+        """Cancel selection"""
+        if self._closed:
+            return
+        self._closed = True
+        self._cleanup()
         self.on_cancel()
+    
+    def _cleanup(self):
+        """Clean up resources"""
+        try:
+            self.grab_release()
+        except:
+            pass
+        
+        try:
+            self.destroy()
+        except:
+            pass

@@ -53,7 +53,7 @@ Write-Host "`nSigning Setup..." -ForegroundColor Cyan
     /t http://timestamp.digicert.com `
     /fd SHA256 `
     /v `
-    "setup\NeoRecorder_Setup_v1.4.3.exe"
+    "setup\NeoRecorder_Setup_v1.4.4.exe"
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host "✅ Setup signed successfully" -ForegroundColor Green
