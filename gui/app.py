@@ -643,7 +643,7 @@ class NeoRecorderApp(ctk.CTk):
     def _open_quick_overlay(self):
         if self.quick_overlay:
             return
-        from gui.overlay import QuickOverlay
+        from gui.quick_overlay import QuickOverlay
         self.quick_overlay = QuickOverlay(
             master=self,
             on_screenshot=self._quick_screenshot,

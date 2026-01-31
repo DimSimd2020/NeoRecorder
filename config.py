@@ -21,7 +21,7 @@ NEON_BLUE = "#00F2FF"
 
 # App Info
 APP_NAME = "NeoRecorder"
-VERSION = "1.4.5"
+VERSION = "1.4.6"
 AUTHOR = "DimSimd"
 
 
