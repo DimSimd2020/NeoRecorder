@@ -276,6 +276,9 @@ class NeoRecorderApp(ctk.CTk):
     def _register_hotkeys(self):
         """Register global hotkeys"""
         try:
+            # Unregister existing hotkeys first
+            self.hotkey_manager.unregister_all()
+            
             # Quick overlay hotkey
             quick_key = self._settings.get_hotkey("quick_overlay")
             if quick_key:
