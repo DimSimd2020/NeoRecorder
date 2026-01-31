@@ -332,16 +332,26 @@ class NeoRecorderApp(ctk.CTk):
         # Hide main window
         self.withdraw()
         
-        # Show floating widget
-        self.widget = RecordingWidget(self, on_stop=self.stop_recording, on_pause=self.on_pause_recording)
+        # Show floating widget with accurate elapsed time callback
+        self.widget = RecordingWidget(
+            self, 
+            on_stop=self.stop_recording, 
+            on_pause=self.on_pause_recording,
+            get_elapsed=self.recorder.get_elapsed_time
+        )
         
         self.recorder.start(mode=self.recording_mode, rect=self.selected_rect, 
                            mic=mic_name, system=system_audio)
-        self.start_time = time.time()
         self.update_timer()
 
-    def on_pause_recording(self, is_paused):
-        pass  # Pause not fully supported with current FFmpeg approach
+    def on_pause_recording(self, should_pause: bool) -> bool:
+        """Toggle pause state and return new pause state"""
+        if should_pause:
+            success = self.recorder.pause()
+            return success  # Returns True if now paused
+        else:
+            success = self.recorder.resume()
+            return not success  # Returns False if now resumed
 
     def stop_recording(self):
         if hasattr(self, 'widget') and self.widget:
@@ -366,11 +376,12 @@ class NeoRecorderApp(ctk.CTk):
 
     def update_timer(self):
         if self.recorder.is_recording:
-            elapsed = int(time.time() - self.start_time)
+            # Use recorder's elapsed time (accounts for pauses)
+            elapsed = int(self.recorder.get_elapsed_time())
             mins, secs = divmod(elapsed, 60)
             hrs, mins = divmod(mins, 60)
             self.timer_label.configure(text=f"{hrs:02d}:{mins:02d}:{secs:02d}")
-            self.after(1000, self.update_timer)
+            self.after(500, self.update_timer)  # Update more frequently
 
     def update_vu_meter(self):
         level = self.audio_manager.get_vu_level()

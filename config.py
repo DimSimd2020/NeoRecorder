@@ -11,7 +11,7 @@ NEON_BLUE = "#00F2FF" # Neon blue for cyber vibe
 
 # App Info
 APP_NAME = "NeoRecorder"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 AUTHOR = "DimSimd"
 
 def resource_path(relative_path):
