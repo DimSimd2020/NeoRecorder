@@ -290,13 +290,6 @@ class FFmpegHandler:
         # Start progress monitor
         self._start_output_monitor()
         
-        # Wait briefly to check for immediate failure
-        time.sleep(0.5)
-        if self.process.poll() is not None:
-            self._close_log_file()
-            self.process = None
-            return False
-            
         return True
 
     def _start_output_monitor(self):

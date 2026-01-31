@@ -342,6 +342,12 @@ class NeoRecorderApp(ctk.CTk):
         self.screenshot_capture = get_screenshot_capture()
         self.hotkey_manager = get_hotkey_manager()
         
+        # Register recorder callbacks
+        self.recorder.set_callbacks(
+            on_error=self.on_recording_error,
+            on_complete=self.on_recording_complete_event
+        )
+        
         # State
         self.recording_mode = self._settings.get("last_mode", "screen")
         self.selected_rect = None
@@ -350,6 +356,28 @@ class NeoRecorderApp(ctk.CTk):
         self.widget = None
         self.quick_overlay = None
         self.tray = None
+
+    def on_recording_error(self, error):
+        """Handle recording error from backend"""
+        self.after(0, lambda: self._handle_recording_error_ui(error))
+        
+    def _handle_recording_error_ui(self, error):
+        # Stop UI state
+        if hasattr(self, 'widget') and self.widget:
+            self.widget.destroy()
+            self.widget = None
+        
+        self.deiconify()
+        self.rec_btn.configure(image=self.icon_rec, fg_color="transparent")
+        self.timer_label.configure(text="00:00:00")
+        
+        from utils.notifications import show_simple_notification
+        show_simple_notification("Recording Error", str(error))
+        
+    def on_recording_complete_event(self, result):
+        """Handle async recording stop (e.g. from hotkey or error recovery)"""
+        # This might be called when we stop manually too, so check state
+        pass
 
     def _init_tray(self):
         """Initialize system tray"""
@@ -583,16 +611,12 @@ class NeoRecorderApp(ctk.CTk):
             get_elapsed=self.recorder.get_elapsed_time,
             get_progress=self.recorder.get_progress
         )
+        # Force widget to render before we start potentially blocking operations
+        self.widget.update()
         
-        result = self.recorder.start(mode=self.recording_mode, rect=self.selected_rect, 
-                                     mic=mic_name, system=system_audio)
-        
-        if not result:
-            self.widget.destroy()
-            self.widget = None
-            self.deiconify()
-            self.rec_btn.configure(image=self.icon_rec, fg_color="transparent")
-            return
+        # This starts recording asynchronously now (no sleep)
+        self.recorder.start(mode=self.recording_mode, rect=self.selected_rect, 
+                            mic=mic_name, system=system_audio)
         
         self.update_timer()
 
