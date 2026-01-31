@@ -45,7 +45,6 @@ def build():
         '--hidden-import=comtypes',
         '--hidden-import=comtypes.client',
         '--hidden-import=winotify',
-        '--hidden-import=win10toast',
         '--hidden-import=win32gui',
         '--hidden-import=win32process',
         '--hidden-import=psutil',
@@ -53,6 +52,11 @@ def build():
         '--hidden-import=PIL.Image',
         '--hidden-import=pyaudio',
         '--hidden-import=numpy',
+        '--hidden-import=pystray',
+        '--hidden-import=pystray._win32',
+        '--hidden-import=keyboard',
+        '--hidden-import=mss',
+        '--hidden-import=mss.windows',
     ]
 
     # Prepare command

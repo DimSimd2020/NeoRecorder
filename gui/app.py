@@ -12,14 +12,19 @@ from core.recorder import ScreenRecorder
 from gui.widgets import VUMeter
 from gui.overlay import RegionOverlay
 from gui.recording_widget import RecordingWidget
+from gui.tray import SystemTray
+from gui.quick_overlay import QuickOverlay
 from utils.notifications import show_recording_complete
+from utils.hotkeys import get_hotkey_manager
+from utils.screenshot import get_screenshot_capture
+from utils.logger import get_logger
 
 class SettingsWindow(ctk.CTkToplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.parent = parent
         self.title(parent.t("settings"))
-        self.geometry("450x500")
+        self.geometry("480x650")
         self.configure(fg_color=BG_COLOR)
         self.attributes("-topmost", True)
         
@@ -29,46 +34,28 @@ class SettingsWindow(ctk.CTkToplevel):
         # Title
         ctk.CTkLabel(self, text=self.parent.t("settings"), 
                     font=("Segoe UI", 22, "bold"), 
-                    text_color=NEON_BLUE).pack(pady=20)
+                    text_color=NEON_BLUE).pack(pady=15)
         
-        # Main scrollable frame
-        self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.main_frame.pack(fill="both", expand=True, padx=20, pady=10)
+        # Scrollable frame
+        self.scroll_frame = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.scroll_frame.pack(fill="both", expand=True, padx=20, pady=5)
         
         # === Language Section ===
-        lang_frame = ctk.CTkFrame(self.main_frame, fg_color="#333333", corner_radius=10)
-        lang_frame.pack(fill="x", pady=10)
+        lang_frame = ctk.CTkFrame(self.scroll_frame, fg_color="#333333", corner_radius=10)
+        lang_frame.pack(fill="x", pady=8)
         
         ctk.CTkLabel(lang_frame, text="Language / Язык:", 
                     font=("Segoe UI", 12, "bold")).pack(pady=10, padx=15, anchor="w")
         self.lang_combo = ctk.CTkComboBox(lang_frame, values=["ru", "en"], 
                                           width=200, command=self.change_lang)
         self.lang_combo.set(self.parent.current_lang)
-        self.lang_combo.pack(pady=(0, 15), padx=15, anchor="w")
+        self.lang_combo.pack(pady=(0, 12), padx=15, anchor="w")
 
-        # === Output Path Section ===
-        path_frame = ctk.CTkFrame(self.main_frame, fg_color="#333333", corner_radius=10)
-        path_frame.pack(fill="x", pady=10)
+        # === Recording Settings ===
+        rec_frame = ctk.CTkFrame(self.scroll_frame, fg_color="#333333", corner_radius=10)
+        rec_frame.pack(fill="x", pady=8)
         
-        ctk.CTkLabel(path_frame, text=self.parent.t("output_path") + ":", 
-                    font=("Segoe UI", 12, "bold")).pack(pady=10, padx=15, anchor="w")
-        
-        path_row = ctk.CTkFrame(path_frame, fg_color="transparent")
-        path_row.pack(fill="x", padx=15, pady=(0, 15))
-        
-        self.path_entry = ctk.CTkEntry(path_row, width=320, height=35)
-        self.path_entry.insert(0, self.parent.recorder.get_output_dir())
-        self.path_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        
-        self.browse_btn = ctk.CTkButton(path_row, text=self.parent.t("browse"), 
-                                        width=80, height=35, command=self.browse_path)
-        self.browse_btn.pack(side="right")
-
-        # === Recording Settings Section ===
-        rec_frame = ctk.CTkFrame(self.main_frame, fg_color="#333333", corner_radius=10)
-        rec_frame.pack(fill="x", pady=10)
-        
-        ctk.CTkLabel(rec_frame, text=self.parent.t("fps") + ":", 
+        ctk.CTkLabel(rec_frame, text="🎬 " + self.parent.t("fps") + ":", 
                     font=("Segoe UI", 12, "bold")).pack(pady=10, padx=15, anchor="w")
         
         fps_values = [str(f) for f in FPS_OPTIONS]
@@ -77,7 +64,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.fps_combo.pack(pady=(0, 10), padx=15, anchor="w")
         
         ctk.CTkLabel(rec_frame, text=self.parent.t("quality") + ":", 
-                    font=("Segoe UI", 12, "bold")).pack(pady=10, padx=15, anchor="w")
+                    font=("Segoe UI", 12, "bold")).pack(pady=5, padx=15, anchor="w")
         
         lang_key = "label_ru" if self.parent.current_lang == "ru" else "label_en"
         quality_labels = [QUALITY_PRESETS[k][lang_key] for k in QUALITY_PRESETS]
@@ -95,12 +82,82 @@ class SettingsWindow(ctk.CTkToplevel):
                        "GPU (AMF)" if "amf" in encoder else "CPU (x264)"
         
         ctk.CTkLabel(rec_frame, text=f"{self.parent.t('encoder')}: {encoder_label}", 
-                    font=("Segoe UI", 11), text_color=SECONDARY_TEXT_COLOR).pack(pady=(5, 15), padx=15, anchor="w")
+                    font=("Segoe UI", 11), text_color=SECONDARY_TEXT_COLOR).pack(pady=(0, 12), padx=15, anchor="w")
+
+        # === Output Path ===
+        path_frame = ctk.CTkFrame(self.scroll_frame, fg_color="#333333", corner_radius=10)
+        path_frame.pack(fill="x", pady=8)
+        
+        ctk.CTkLabel(path_frame, text="📁 " + self.parent.t("output_path") + ":", 
+                    font=("Segoe UI", 12, "bold")).pack(pady=10, padx=15, anchor="w")
+        
+        path_row = ctk.CTkFrame(path_frame, fg_color="transparent")
+        path_row.pack(fill="x", padx=15, pady=(0, 12))
+        
+        self.path_entry = ctk.CTkEntry(path_row, width=300, height=35)
+        self.path_entry.insert(0, self.parent.recorder.get_output_dir())
+        self.path_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        
+        self.browse_btn = ctk.CTkButton(path_row, text="...", 
+                                        width=50, height=35, command=self.browse_path)
+        self.browse_btn.pack(side="right")
+
+        # === Tray Settings ===
+        tray_frame = ctk.CTkFrame(self.scroll_frame, fg_color="#333333", corner_radius=10)
+        tray_frame.pack(fill="x", pady=8)
+        
+        ctk.CTkLabel(tray_frame, text="🔔 Фоновый режим:", 
+                    font=("Segoe UI", 12, "bold")).pack(pady=10, padx=15, anchor="w")
+        
+        self.tray_switch = ctk.CTkSwitch(
+            tray_frame, 
+            text="Сворачивать в трей при закрытии",
+            font=("Segoe UI", 11)
+        )
+        self.tray_switch.pack(pady=5, padx=15, anchor="w")
+        if settings.get("minimize_to_tray", True):
+            self.tray_switch.select()
+        
+        self.start_min_switch = ctk.CTkSwitch(
+            tray_frame, 
+            text="Запускать свёрнутым",
+            font=("Segoe UI", 11)
+        )
+        self.start_min_switch.pack(pady=(5, 12), padx=15, anchor="w")
+        if settings.get("start_minimized", False):
+            self.start_min_switch.select()
+
+        # === Hotkeys Section ===
+        hotkey_frame = ctk.CTkFrame(self.scroll_frame, fg_color="#333333", corner_radius=10)
+        hotkey_frame.pack(fill="x", pady=8)
+        
+        ctk.CTkLabel(hotkey_frame, text="⌨️ Горячие клавиши:", 
+                    font=("Segoe UI", 12, "bold")).pack(pady=10, padx=15, anchor="w")
+        
+        # Quick overlay hotkey
+        hk_row1 = ctk.CTkFrame(hotkey_frame, fg_color="transparent")
+        hk_row1.pack(fill="x", padx=15, pady=5)
+        
+        ctk.CTkLabel(hk_row1, text="Быстрый захват:", width=150,
+                    font=("Segoe UI", 11)).pack(side="left")
+        self.quick_hotkey_entry = ctk.CTkEntry(hk_row1, width=150, height=32)
+        self.quick_hotkey_entry.insert(0, settings.get_hotkey("quick_overlay"))
+        self.quick_hotkey_entry.pack(side="left", padx=10)
+        
+        # Show window hotkey
+        hk_row2 = ctk.CTkFrame(hotkey_frame, fg_color="transparent")
+        hk_row2.pack(fill="x", padx=15, pady=(5, 12))
+        
+        ctk.CTkLabel(hk_row2, text="Показать окно:", width=150,
+                    font=("Segoe UI", 11)).pack(side="left")
+        self.show_hotkey_entry = ctk.CTkEntry(hk_row2, width=150, height=32)
+        self.show_hotkey_entry.insert(0, settings.get_hotkey("show_window"))
+        self.show_hotkey_entry.pack(side="left", padx=10)
 
         # === Save Button ===
-        save_btn = ctk.CTkButton(self, text="OK", width=120, height=40, 
+        save_btn = ctk.CTkButton(self, text="Сохранить", width=140, height=40, 
                                  fg_color=ACCENT_COLOR, command=self.save_and_close)
-        save_btn.pack(pady=20)
+        save_btn.pack(pady=15)
 
     def browse_path(self):
         new_path = ctk.filedialog.askdirectory(initialdir=self.parent.recorder.get_output_dir())
@@ -119,6 +176,7 @@ class SettingsWindow(ctk.CTkToplevel):
             fps = int(self.fps_combo.get())
             self.parent.current_fps = fps
             self.parent.recorder.set_fps(fps)
+            settings.set("fps", fps)
         except ValueError:
             pass
         
@@ -129,12 +187,30 @@ class SettingsWindow(ctk.CTkToplevel):
             if preset[lang_key] == selected_label:
                 self.parent.current_quality = key
                 self.parent.recorder.set_quality(key)
+                settings.set("quality", key)
                 break
         
         # Save path
         new_path = self.path_entry.get()
         if new_path and os.path.exists(new_path):
             self.parent.recorder.set_output_dir(new_path)
+            settings.set("output_dir", new_path)
+        
+        # Save tray settings
+        settings.set("minimize_to_tray", self.tray_switch.get())
+        settings.set("start_minimized", self.start_min_switch.get())
+        
+        # Save hotkeys
+        quick_key = self.quick_hotkey_entry.get().strip()
+        show_key = self.show_hotkey_entry.get().strip()
+        
+        if quick_key:
+            settings.set_hotkey("quick_overlay", quick_key)
+        if show_key:
+            settings.set_hotkey("show_window", show_key)
+        
+        # Re-register hotkeys
+        self.parent._register_hotkeys()
         
         self.destroy()
 
@@ -143,23 +219,138 @@ class NeoRecorderApp(ctk.CTk):
         super().__init__()
 
         self.title(APP_NAME)
-        self.geometry("420x600")
+        self.geometry("420x650")
         self.configure(fg_color=BG_COLOR)
         
-        self.lang_data = self.load_lang(DEFAULT_LANG)
+        # Logger
+        self._logger = get_logger()
+        
+        # Load settings
+        self._settings = settings
+        self.current_lang = self._settings.get("language", DEFAULT_LANG)
+        self.current_fps = self._settings.get("fps", DEFAULT_FPS)
+        self.current_quality = self._settings.get("quality", DEFAULT_QUALITY)
+        
+        # Load language
+        self.lang_data = self.load_lang(self.current_lang)
+        
+        # Core components
         self.audio_manager = AudioManager()
         self.window_finder = WindowFinder()
         self.recorder = ScreenRecorder()
+        self.screenshot_capture = get_screenshot_capture()
         
-        self.current_lang = DEFAULT_LANG
-        self.current_fps = DEFAULT_FPS
-        self.current_quality = DEFAULT_QUALITY
-        self.recording_mode = "screen"  # screen, region, window
+        # State
+        self.recording_mode = self._settings.get("last_mode", "screen")
         self.selected_rect = None
         self.selected_window_hwnd = None
+        self.widget = None
+        self.quick_overlay = None
         
+        # System tray
+        self.tray = None
+        if self._settings.get("minimize_to_tray", True):
+            self._init_tray()
+        
+        # Hotkeys
+        self.hotkey_manager = get_hotkey_manager()
+        self._register_hotkeys()
+        
+        # Setup UI
         self.setup_ui()
         self.update_vu_meter()
+        
+        # Start minimized?
+        if self._settings.get("start_minimized", False):
+            self.after(100, self._minimize_to_tray)
+    
+    def _init_tray(self):
+        """Initialize system tray"""
+        self.tray = SystemTray(
+            on_show=self._show_from_tray,
+            on_quick_capture=self._open_quick_overlay,
+            on_quit=self._quit_app
+        )
+        self.tray.start()
+    
+    def _register_hotkeys(self):
+        """Register global hotkeys"""
+        try:
+            # Quick overlay hotkey
+            quick_key = self._settings.get_hotkey("quick_overlay")
+            if quick_key:
+                self.hotkey_manager.register(
+                    quick_key, 
+                    self._open_quick_overlay_threadsafe,
+                    "quick_overlay"
+                )
+            
+            # Show window hotkey
+            show_key = self._settings.get_hotkey("show_window")
+            if show_key:
+                self.hotkey_manager.register(
+                    show_key,
+                    self._show_from_tray_threadsafe,
+                    "show_window"
+                )
+        except Exception as e:
+            self._logger.error(f"Failed to register hotkeys: {e}")
+    
+    def _open_quick_overlay_threadsafe(self):
+        """Thread-safe quick overlay open"""
+        self.after(0, self._open_quick_overlay)
+    
+    def _show_from_tray_threadsafe(self):
+        """Thread-safe show from tray"""
+        self.after(0, self._show_from_tray)
+    
+    def _open_quick_overlay(self):
+        """Open quick capture overlay"""
+        if self.quick_overlay:
+            return
+        
+        self.quick_overlay = QuickOverlay(
+            on_screenshot=self._quick_screenshot,
+            on_record=self._quick_record,
+            on_close=self._on_quick_overlay_closed
+        )
+    
+    def _on_quick_overlay_closed(self):
+        """Handle quick overlay closed"""
+        self.quick_overlay = None
+    
+    def _quick_screenshot(self, rect):
+        """Handle quick screenshot"""
+        path = self.screenshot_capture.capture_region(rect)
+        if path:
+            show_recording_complete(
+                os.path.basename(path),
+                os.path.dirname(path),
+                "Снимок"
+            )
+    
+    def _quick_record(self, rect):
+        """Handle quick record from overlay"""
+        self.selected_rect = rect
+        self.recording_mode = "region"
+        self.start_recording()
+    
+    def _minimize_to_tray(self):
+        """Minimize to system tray"""
+        if self.tray and self.tray.is_running:
+            self.withdraw()
+        else:
+            self.iconify()
+    
+    def _show_from_tray(self):
+        """Show window from tray"""
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+    
+    def _quit_app(self):
+        """Fully quit application"""
+        self.on_closing(force_quit=True)
 
     def load_lang(self, lang):
         path = os.path.join(LANG_DIR, f"{lang}.json")
@@ -401,24 +592,59 @@ class NeoRecorderApp(ctk.CTk):
     def open_folder(self):
         os.startfile(self.recorder.get_output_dir())
 
-    def on_closing(self):
-        """Clean up resources before closing"""
+    def on_closing(self, force_quit=False):
+        """Handle window close - minimize to tray or quit"""
+        # If tray is enabled and not force quit, minimize instead
+        if not force_quit and self._settings.get("minimize_to_tray", True):
+            if self.tray and self.tray.is_running:
+                self._minimize_to_tray()
+                return
+        
+        # Full cleanup and quit
+        self._cleanup()
+        self.destroy()
+    
+    def _cleanup(self):
+        """Clean up all resources"""
+        # Save settings
+        self._settings.set("language", self.current_lang)
+        self._settings.set("fps", self.current_fps)
+        self._settings.set("quality", self.current_quality)
+        self._settings.set("last_mode", self.recording_mode)
+        
         # Stop recording if active
         if self.recorder.is_recording:
             self.recorder.stop()
+        
+        # Stop hotkeys
+        if hasattr(self, 'hotkey_manager'):
+            self.hotkey_manager.stop()
+        
+        # Stop tray
+        if self.tray:
+            self.tray.stop()
         
         # Stop audio monitoring
         self.audio_manager.stop_monitoring()
         self.audio_manager.terminate()
         
-        # Close any open widget
+        # Cleanup screenshot
+        if hasattr(self, 'screenshot_capture'):
+            self.screenshot_capture.cleanup()
+        
+        # Close widgets
         if hasattr(self, 'widget') and self.widget:
             try:
                 self.widget.destroy()
             except:
                 pass
         
-        self.destroy()
+        if hasattr(self, 'quick_overlay') and self.quick_overlay:
+            try:
+                self.quick_overlay.destroy()
+            except:
+                pass
+
 
 if __name__ == "__main__":
     app = NeoRecorderApp()

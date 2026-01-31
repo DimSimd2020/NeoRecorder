@@ -16,7 +16,15 @@ psutil>=5.9.0
 
 # Notifications
 winotify>=1.1.0
-win10toast>=0.9
+
+# System tray
+pystray>=0.19.0
+
+# Hotkeys
+keyboard>=0.13.5
+
+# Fast screenshots
+mss>=9.0.0
 
 # Build (optional)
 pyinstaller>=6.0.0
