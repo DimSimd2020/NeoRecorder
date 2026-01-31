@@ -154,6 +154,49 @@ class SettingsWindow(ctk.CTkToplevel):
         self.show_hotkey_entry.insert(0, settings.get_hotkey("show_window"))
         self.show_hotkey_entry.pack(side="left", padx=10)
 
+        # === Screenshots Path ===
+        scr_path_frame = ctk.CTkFrame(self.scroll_frame, fg_color="#333333", corner_radius=10)
+        scr_path_frame.pack(fill="x", pady=8)
+        
+        ctk.CTkLabel(scr_path_frame, text="📸 " + self.parent.t("screenshots_path") + ":", 
+                    font=("Segoe UI", 12, "bold")).pack(pady=10, padx=15, anchor="w")
+        
+        scr_path_row = ctk.CTkFrame(scr_path_frame, fg_color="transparent")
+        scr_path_row.pack(fill="x", padx=15, pady=(0, 12))
+        
+        self.scr_path_entry = ctk.CTkEntry(scr_path_row, width=300, height=35)
+        self.scr_path_entry.insert(0, settings.get("screenshots_dir", SCREENSHOTS_DIR))
+        self.scr_path_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        
+        self.browse_scr_btn = ctk.CTkButton(scr_path_row, text="...", 
+                                        width=50, height=35, command=self.browse_screenshots)
+        self.browse_scr_btn.pack(side="right")
+
+        # === Overlay Settings ===
+        ovr_frame = ctk.CTkFrame(self.scroll_frame, fg_color="#333333", corner_radius=10)
+        ovr_frame.pack(fill="x", pady=8)
+        
+        ctk.CTkLabel(ovr_frame, text="🎨 " + self.parent.t("overlay_settings") + ":", 
+                    font=("Segoe UI", 12, "bold")).pack(pady=10, padx=15, anchor="w")
+        
+        self.ovr_dim_switch = ctk.CTkSwitch(
+            ovr_frame, 
+            text=self.parent.t("dim_screen"),
+            font=("Segoe UI", 11)
+        )
+        self.ovr_dim_switch.pack(pady=5, padx=15, anchor="w")
+        if settings.get("overlay_dim_screen", True):
+            self.ovr_dim_switch.select()
+            
+        self.ovr_lock_switch = ctk.CTkSwitch(
+            ovr_frame, 
+            text=self.parent.t("lock_input"),
+            font=("Segoe UI", 11)
+        )
+        self.ovr_lock_switch.pack(pady=(5, 12), padx=15, anchor="w")
+        if settings.get("overlay_lock_input", True):
+            self.ovr_lock_switch.select()
+
         # === Save Button ===
         save_btn = ctk.CTkButton(self, text="Сохранить", width=140, height=40, 
                                  fg_color=ACCENT_COLOR, command=self.save_and_close)
@@ -165,6 +208,12 @@ class SettingsWindow(ctk.CTkToplevel):
             self.parent.recorder.set_output_dir(new_path)
             self.path_entry.delete(0, "end")
             self.path_entry.insert(0, new_path)
+
+    def browse_screenshots(self):
+        new_path = ctk.filedialog.askdirectory(initialdir=settings.get("screenshots_dir", SCREENSHOTS_DIR))
+        if new_path:
+            self.scr_path_entry.delete(0, "end")
+            self.scr_path_entry.insert(0, new_path)
 
     def change_lang(self, new_lang):
         self.parent.change_language(new_lang)
@@ -208,6 +257,16 @@ class SettingsWindow(ctk.CTkToplevel):
             settings.set_hotkey("quick_overlay", quick_key)
         if show_key:
             settings.set_hotkey("show_window", show_key)
+        
+        # Save screenshot path
+        scr_path = self.scr_path_entry.get()
+        if scr_path and os.path.exists(scr_path):
+            self.parent.screenshot_capture.set_output_dir(scr_path)
+            settings.set("screenshots_dir", scr_path)
+
+        # Save overlay settings
+        settings.set("overlay_dim_screen", self.ovr_dim_switch.get())
+        settings.set("overlay_lock_input", self.ovr_lock_switch.get())
         
         # Re-register hotkeys
         self.parent._register_hotkeys()
@@ -326,10 +385,15 @@ class NeoRecorderApp(ctk.CTk):
         """Handle quick screenshot"""
         path = self.screenshot_capture.capture_region(rect)
         if path:
+            # Get file size
+            size_mb = os.path.getsize(path) / (1024 * 1024)
+            size_str = f"{size_mb:.2f} MB"
+            
+            # Show notification
             show_recording_complete(
-                os.path.basename(path),
-                os.path.dirname(path),
-                "Снимок"
+                self.t("screenshot_saved"),
+                self.t("screenshot_saved_desc").format(path=os.path.basename(path), size=size_str),
+                os.path.dirname(path)
             )
     
     def _quick_record(self, rect):

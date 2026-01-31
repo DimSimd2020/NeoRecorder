@@ -1,8 +1,10 @@
 """
-Configuration for NeoRecorder v1.4.0
+Configuration for NeoRecorder v1.4.3
 - User settings with persistence
 - Hotkey configuration
 - System tray settings
+- Screenshot settings
+- Overlay settings
 """
 
 import os
@@ -19,7 +21,7 @@ NEON_BLUE = "#00F2FF"
 
 # App Info
 APP_NAME = "NeoRecorder"
-VERSION = "1.4.2"
+VERSION = "1.4.3"
 AUTHOR = "DimSimd"
 
 
@@ -90,11 +92,15 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "fps": DEFAULT_FPS,
     "quality": DEFAULT_QUALITY,
     "output_dir": USER_DATA_DIR,
+    "screenshots_dir": SCREENSHOTS_DIR,
     "minimize_to_tray": True,
     "start_minimized": False,
     "start_with_windows": False,
     "hotkeys": DEFAULT_HOTKEYS.copy(),
     "last_mode": "screen",
+    # Overlay settings
+    "overlay_dim_screen": True,
+    "overlay_lock_input": True,
 }
 
 

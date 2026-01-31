@@ -126,17 +126,24 @@ class ScreenshotCapture:
     
     def _save_screenshot(self, screenshot) -> str:
         """Save screenshot to file"""
-        self._ensure_output_dir()
+        from config import settings
         
+        # Get path from settings or use default
+        output_dir = settings.get("screenshots_dir", self._output_dir)
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
+            
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         filename = f"Screenshot_{timestamp}.{SCREENSHOT_FORMAT}"
-        filepath = os.path.join(self._output_dir, filename)
+        filepath = os.path.join(output_dir, filename)
         
         # Convert and save
         img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
         img.save(filepath, optimize=True)
         
+        # Log
         log_debug(f"Screenshot saved: {filepath}")
+        
         return filepath
     
     def _copy_image_to_clipboard(self, image: Image.Image):

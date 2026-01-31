@@ -19,5 +19,12 @@
     "browse": "Browse",
     "recording_saved": "Recording Saved",
     "notification_title": "NeoRecorder",
-    "open_folder": "Open Folder"
+    "open_folder": "Open Folder",
+    "screenshot_saved": "Screenshot Saved",
+    "screenshot_saved_desc": "Saved to {path}\nSize: {size}",
+    "overlay_settings": "Overlay Settings",
+    "dim_screen": "Dim Screen",
+    "lock_input": "Lock Input",
+    "screenshots_path": "Screenshots Path",
+    "browse_screenshots": "Change"
 }

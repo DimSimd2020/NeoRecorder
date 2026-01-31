@@ -19,5 +19,12 @@
     "browse": "Обзор",
     "recording_saved": "Запись сохранена",
     "notification_title": "NeoRecorder",
-    "open_folder": "Открыть папку"
+    "open_folder": "Открыть папку",
+    "screenshot_saved": "Скриншот сохранён",
+    "screenshot_saved_desc": "Сохранено в {path}\nРазмер: {size}",
+    "overlay_settings": "Настройки оверлея",
+    "dim_screen": "Затемнять экран",
+    "lock_input": "Блокировать ввод",
+    "screenshots_path": "Путь скриншотов",
+    "browse_screenshots": "Изменить"
 }

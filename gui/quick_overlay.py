@@ -251,6 +251,20 @@ class SelectionOverlay(tk.Toplevel):
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
         self.bind("<Escape>", lambda e: self._cancel())
         
+        # Lock input if requested
+        from config import settings
+        self.lock_input = settings.get("overlay_lock_input", True)
+        self.dim_screen = settings.get("overlay_dim_screen", True)
+        
+        if self.dim_screen:
+            self.attributes("-alpha", 0.3)
+        else:
+            self.attributes("-alpha", 0.01) # Almost transparent but captures clicks
+            
+        if self.lock_input:
+            self.grab_set() # Capture all events
+            self.focus_force()
+        
         # Instructions
         self.instructions = tk.Label(
             self.canvas,

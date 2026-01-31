@@ -4,7 +4,7 @@
 ; Compile with: iscc setup_script.iss
 
 #define MyAppName "NeoRecorder"
-#define MyAppVersion "1.4.2"
+#define MyAppVersion "1.4.3"
 #define MyAppPublisher "DimSimd"
 #define MyAppURL "https://github.com/DimSimd2020/NeoRecorder"
 #define MyAppExeName "NeoRecorder.exe"

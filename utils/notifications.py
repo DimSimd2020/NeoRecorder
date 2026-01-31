@@ -4,20 +4,33 @@
 import os
 import threading
 
-def show_recording_complete(filename, path, duration):
+def show_recording_complete(title_or_filename, message_or_path, path_or_action=None):
     """
-    Show Windows notification when recording is complete.
+    Show Windows notification.
     
-    Args:
-        filename: Name of the saved file
-        path: Directory where file was saved
-        duration: Duration string (e.g., "05:32")
+    Overloaded:
+    1. show_recording_complete(filename, path, duration) -> Legacy video recording
+    2. show_recording_complete(title, message, open_path) -> Generic notification
     """
-    title = "NeoRecorder"
-    message = f"{filename} сохранено в {path}.\nДлительность записи: {duration}"
+    
+    # Determine arguments
+    if path_or_action and os.path.exists(str(message_or_path)):
+        # Legacy: filename, path, duration
+        filename = title_or_filename
+        path = message_or_path
+        duration = path_or_action
+        
+        title = "NeoRecorder"
+        message = f"{filename}\n{duration}"
+        click_path = path
+    else:
+        # Generic: title, message, open_path
+        title = title_or_filename
+        message = message_or_path
+        click_path = path_or_action
     
     # Run in thread to not block UI
-    threading.Thread(target=_show_toast, args=(title, message, path), daemon=True).start()
+    threading.Thread(target=_show_toast, args=(title, message, click_path), daemon=True).start()
 
 def _show_toast(title, message, path):
     """Internal function to show toast notification"""
