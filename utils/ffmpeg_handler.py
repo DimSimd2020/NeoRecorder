@@ -15,6 +15,7 @@ import tempfile
 from typing import Optional, Dict, Callable, List
 from dataclasses import dataclass
 from config import FFMPEG_PATH, QUALITY_PRESETS, USE_HARDWARE_ENCODER
+from utils.logger import get_logger, log_ffmpeg_output, log_error, log_debug
 
 
 @dataclass
@@ -119,7 +120,7 @@ class FFmpegHandler:
         Returns True if started successfully.
         """
         if self._is_recording:
-            print("Warning: Already recording. Call stop first.")
+            log_debug("Warning: Already recording. Call stop first.")
             return False
         
         self._stop_event.clear()

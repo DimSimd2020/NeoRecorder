@@ -12,6 +12,7 @@ import time
 import threading
 from typing import Optional, Dict, Callable, List
 from utils.ffmpeg_handler import FFmpegHandler, RecordingProgress
+from utils.logger import log_recording_start, log_recording_stop, log_error, get_logger
 from config import DEFAULT_FORMAT, DEFAULT_FPS, DEFAULT_QUALITY
 
 
@@ -119,6 +120,12 @@ class ScreenRecorder:
             
             if success:
                 self.is_recording = True
+                log_recording_start(
+                    self.current_output_path,
+                    self.fps,
+                    self.quality,
+                    self.handler.get_best_encoder()
+                )
                 return self.current_output_path
             else:
                 self.current_output_path = None
@@ -145,6 +152,13 @@ class ScreenRecorder:
                     result["total_frames"] = progress.frame
                     result["avg_fps"] = progress.fps
                     result["final_bitrate"] = progress.bitrate
+                
+                # Log recording stop
+                log_recording_stop(
+                    result.get("output_path", ""),
+                    result.get("duration", 0),
+                    result.get("segments_count", 1)
+                )
             
             return result
     

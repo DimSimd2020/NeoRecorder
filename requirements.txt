@@ -1,0 +1,22 @@
+# NeoRecorder Dependencies
+
+# GUI
+customtkinter>=5.2.0
+Pillow>=10.0.0
+
+# Audio
+pyaudio>=0.2.13
+numpy>=1.24.0
+
+# Windows integration
+pywin32>=306
+pycaw>=20230407
+comtypes>=1.2.0
+psutil>=5.9.0
+
+# Notifications
+winotify>=1.1.0
+win10toast>=0.9
+
+# Build (optional)
+pyinstaller>=6.0.0
