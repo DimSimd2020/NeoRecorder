@@ -57,6 +57,11 @@ def build():
         '--hidden-import=keyboard',
         '--hidden-import=mss',
         '--hidden-import=mss.windows',
+        '--hidden-import=plyer',
+        '--hidden-import=plyer.platforms.win.notification',
+        '--hidden-import=plyer.platforms.notification',
+        '--hidden-import=ttkbootstrap',
+        '--hidden-import=ttkbootstrap.toast',
     ]
 
     # Prepare command
@@ -66,6 +71,7 @@ def build():
         '--noconsole',
         '--name=NeoRecorder',
         '--add-data=assets;assets',
+        '--add-data=app_icon.ico;.',
         '--collect-all=customtkinter',
     ] + icon_arg + ffmpeg_arg + hidden_imports
 

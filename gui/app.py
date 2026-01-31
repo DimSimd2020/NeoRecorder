@@ -14,7 +14,7 @@ from gui.overlay import RegionOverlay
 from gui.recording_widget import RecordingWidget
 from gui.tray import SystemTray
 from gui.quick_overlay import QuickOverlay
-from utils.notifications import show_recording_complete
+from utils.notifications import show_recording_complete, show_simple_notification
 from utils.hotkeys import get_hotkey_manager
 from utils.screenshot import get_screenshot_capture
 from utils.logger import get_logger
@@ -263,11 +263,11 @@ class SettingsWindow(ctk.CTkToplevel):
         if scr_path and os.path.exists(scr_path):
             self.parent.screenshot_capture.set_output_dir(scr_path)
             settings.set("screenshots_dir", scr_path)
-
+        
         # Save overlay settings
         settings.set("overlay_dim_screen", self.ovr_dim_switch.get())
         settings.set("overlay_lock_input", self.ovr_lock_switch.get())
-        
+
         # Re-register hotkeys
         self.parent._register_hotkeys()
         
@@ -281,7 +281,48 @@ class NeoRecorderApp(ctk.CTk):
         self.geometry("420x650")
         self.configure(fg_color=BG_COLOR)
         
-        # Logger
+        # Set window icon
+        try:
+            icon_path = resource_path("app_icon.ico")
+            if os.path.exists(icon_path):
+                self.iconbitmap(icon_path)
+        except Exception:
+            pass
+            
+        # 1. Show Loading Screen immediately
+        self.loading_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.loading_frame.place(relx=0.5, rely=0.5, anchor="center")
+        ctk.CTkLabel(self.loading_frame, text="NeoRecorder", font=("Segoe UI", 32, "bold"), text_color=NEON_BLUE).pack(pady=10)
+        ctk.CTkLabel(self.loading_frame, text="Loading...", font=("Segoe UI", 16)).pack()
+        
+        # Force window to render "Loading..." before we freeze it with initialization
+        self.update()
+        
+        # 2. Synchronous Initialization
+        try:
+            self._init_components()
+            
+            # 3. Build UI
+            self.loading_frame.destroy()
+            self.setup_ui()
+            
+            # 4. Final adjustments
+            self._register_hotkeys()
+            
+            if self._settings.get("minimize_to_tray", True):
+                self._init_tray()
+                
+            if self._settings.get("start_minimized", False):
+                self._minimize_to_tray()
+                
+        except Exception as e:
+            # If init fails, show error
+            print(f"Startup Error: {e}")
+            self.loading_frame.destroy()
+            ctk.CTkLabel(self, text=f"Error starting app:\n{e}", text_color="red").pack(expand=True)
+
+    def _init_components(self):
+        """Initialize all backend components"""
         self._logger = get_logger()
         
         # Load settings
@@ -291,141 +332,64 @@ class NeoRecorderApp(ctk.CTk):
         self.current_quality = self._settings.get("quality", DEFAULT_QUALITY)
         
         # Load language
-        self.lang_data = self.load_lang(self.current_lang)
+        self.lang_data = self._load_lang(self.current_lang)
         
-        # Core components
+        # Initialize Core Components
+        # We do this synchronously now to avoid threading issues
         self.audio_manager = AudioManager()
         self.window_finder = WindowFinder()
         self.recorder = ScreenRecorder()
         self.screenshot_capture = get_screenshot_capture()
+        self.hotkey_manager = get_hotkey_manager()
         
         # State
         self.recording_mode = self._settings.get("last_mode", "screen")
         self.selected_rect = None
         self.selected_window_hwnd = None
+        self.active_windows = []
         self.widget = None
         self.quick_overlay = None
-        
-        # System tray
         self.tray = None
-        if self._settings.get("minimize_to_tray", True):
-            self._init_tray()
-        
-        # Hotkeys
-        self.hotkey_manager = get_hotkey_manager()
-        self._register_hotkeys()
-        
-        # Setup UI
-        self.setup_ui()
-        self.update_vu_meter()
-        
-        # Start minimized?
-        if self._settings.get("start_minimized", False):
-            self.after(100, self._minimize_to_tray)
-    
+
     def _init_tray(self):
         """Initialize system tray"""
-        self.tray = SystemTray(
-            on_show=self._show_from_tray,
-            on_quick_capture=self._open_quick_overlay,
-            on_quit=self._quit_app
-        )
-        self.tray.start()
-    
+        try:
+            self.tray = SystemTray(
+                on_show=self._show_from_tray,
+                on_quick_capture=self._open_quick_overlay,
+                on_quit=self._quit_app
+            )
+            self.tray.start()
+        except Exception as e:
+            self._logger.error(f"Failed to init tray: {e}")
+
     def _register_hotkeys(self):
         """Register global hotkeys"""
         try:
-            # Unregister existing hotkeys first
             self.hotkey_manager.unregister_all()
             
-            # Quick overlay hotkey
             quick_key = self._settings.get_hotkey("quick_overlay")
             if quick_key:
-                self.hotkey_manager.register(
-                    quick_key, 
-                    self._open_quick_overlay_threadsafe,
-                    "quick_overlay"
-                )
+                self.hotkey_manager.register(quick_key, self._open_quick_overlay_threadsafe, "quick_overlay")
             
-            # Show window hotkey
             show_key = self._settings.get_hotkey("show_window")
             if show_key:
-                self.hotkey_manager.register(
-                    show_key,
-                    self._show_from_tray_threadsafe,
-                    "show_window"
-                )
+                self.hotkey_manager.register(show_key, self._show_from_tray_threadsafe, "show_window")
         except Exception as e:
             self._logger.error(f"Failed to register hotkeys: {e}")
-    
+
     def _open_quick_overlay_threadsafe(self):
-        """Thread-safe quick overlay open"""
         self.after(0, self._open_quick_overlay)
     
     def _show_from_tray_threadsafe(self):
-        """Thread-safe show from tray"""
         self.after(0, self._show_from_tray)
-    
-    def _open_quick_overlay(self):
-        """Open quick capture overlay"""
-        if self.quick_overlay:
-            return
-        
-        self.quick_overlay = QuickOverlay(
-            on_screenshot=self._quick_screenshot,
-            on_record=self._quick_record,
-            on_close=self._on_quick_overlay_closed
-        )
-    
-    def _on_quick_overlay_closed(self):
-        """Handle quick overlay closed"""
-        self.quick_overlay = None
-    
-    def _quick_screenshot(self, rect):
-        """Handle quick screenshot"""
-        path = self.screenshot_capture.capture_region(rect)
-        if path:
-            # Get file size
-            size_mb = os.path.getsize(path) / (1024 * 1024)
-            size_str = f"{size_mb:.2f} MB"
-            
-            # Show notification
-            show_recording_complete(
-                self.t("screenshot_saved"),
-                self.t("screenshot_saved_desc").format(path=os.path.basename(path), size=size_str),
-                os.path.dirname(path)
-            )
-    
-    def _quick_record(self, rect):
-        """Handle quick record from overlay"""
-        self.selected_rect = rect
-        self.recording_mode = "region"
-        self.start_recording()
-    
-    def _minimize_to_tray(self):
-        """Minimize to system tray"""
-        if self.tray and self.tray.is_running:
-            self.withdraw()
-        else:
-            self.iconify()
-    
-    def _show_from_tray(self):
-        """Show window from tray"""
-        self.deiconify()
-        self.lift()
-        self.focus_force()
-    
-    def _quit_app(self):
-        """Fully quit application"""
-        self.on_closing(force_quit=True)
 
-    def load_lang(self, lang):
+    def _load_lang(self, lang):
         path = os.path.join(LANG_DIR, f"{lang}.json")
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception as e:
-            print(f"Error loading language: {e}")
+        except Exception:
             return {}
 
     def t(self, key):
@@ -433,8 +397,7 @@ class NeoRecorderApp(ctk.CTk):
 
     def change_language(self, lang):
         self.current_lang = lang
-        self.lang_data = self.load_lang(lang)
-        # Refresh UI
+        self.lang_data = self._load_lang(lang)
         for widget in self.winfo_children():
             widget.destroy()
         self.setup_ui()
@@ -497,13 +460,13 @@ class NeoRecorderApp(ctk.CTk):
                                         progress_color=NEON_BLUE)
         self.mic_switch.pack(pady=10, padx=10, anchor="w")
         
-        self.devices = self.audio_manager.get_input_devices()
-        self.device_names = [d['name'] for d in self.devices]
-        self.device_combo = ctk.CTkComboBox(self.audio_frame, values=self.device_names, width=340)
+        self.device_names = []
+        self.device_combo = ctk.CTkComboBox(self.audio_frame, values=[self.t("loading")], width=340)
         self.device_combo.pack(pady=5, padx=10)
-        if self.device_names:
-            self.device_combo.set(self.device_names[0])
-            self.audio_manager.start_monitoring(self.devices[0]['index'])
+        self.device_combo.set(self.t("loading"))
+
+        # Defer audio LISTING to thread (it is safe to do in background as it just enumerates)
+        threading.Thread(target=self._load_audio_devices_thread, daemon=True).start()
         
         self.vu_meter = VUMeter(self.audio_frame, width=360, height=8)
         self.vu_meter.pack(pady=10, padx=10)
@@ -533,13 +496,36 @@ class NeoRecorderApp(ctk.CTk):
         self.btn_settings = ctk.CTkButton(self.bottom_frame, text="", image=self.icon_settings, 
                                           width=40, fg_color="transparent", command=self.open_settings)
         self.btn_settings.pack(side="right", padx=20)
+    
+    def _load_audio_devices_thread(self):
+        """Load audio devices in background"""
+        try:
+            devices = self.audio_manager.get_input_devices()
+            names = [d['name'] for d in devices]
+            self.after(0, lambda: self._update_audio_ui(devices, names))
+        except Exception as e:
+            self._logger.error(f"Audio device load error: {e}")
+
+    def _update_audio_ui(self, devices, names):
+        self.devices = devices
+        self.device_names = names
+        if names:
+            self.device_combo.configure(values=names)
+            self.device_combo.set(names[0])
+            try:
+                self.audio_manager.start_monitoring(devices[0]['index'])
+            except:
+                pass
+        else:
+            self.device_combo.configure(values=["No devices"])
+            self.device_combo.set("No devices")
+        self.update_vu_meter()
 
     def set_mode(self, mode):
         self.recording_mode = mode
         self.window_combo.pack_forget()
         self.selected_rect = None
         
-        # Update button styles to show selected mode
         default_color = "#1F6AA5"
         selected_color = NEON_BLUE
         
@@ -549,8 +535,8 @@ class NeoRecorderApp(ctk.CTk):
 
     def select_region(self):
         self.set_mode("region")
-        overlay = RegionOverlay(self.on_region_selected)
-        overlay.grab_set()
+        from gui.overlay import RegionOverlay
+        overlay = RegionOverlay(self, self.on_region_selected)
 
     def on_region_selected(self, rect):
         self.selected_rect = rect
@@ -587,10 +573,9 @@ class NeoRecorderApp(ctk.CTk):
         mic_name = self.device_combo.get() if self.mic_switch.get() else None
         system_audio = self.sys_audio_switch.get()
         
-        # Hide main window
         self.withdraw()
         
-        # Show floating widget with callbacks for time and progress
+        from gui.recording_widget import RecordingWidget
         self.widget = RecordingWidget(
             self, 
             on_stop=self.stop_recording, 
@@ -603,7 +588,6 @@ class NeoRecorderApp(ctk.CTk):
                                      mic=mic_name, system=system_audio)
         
         if not result:
-            # Recording failed to start
             self.widget.destroy()
             self.widget = None
             self.deiconify()
@@ -613,29 +597,26 @@ class NeoRecorderApp(ctk.CTk):
         self.update_timer()
 
     def on_pause_recording(self, should_pause: bool) -> bool:
-        """Toggle pause state and return new pause state"""
         if should_pause:
             success = self.recorder.pause()
-            return success  # Returns True if now paused
+            return success
         else:
             success = self.recorder.resume()
-            return not success  # Returns False if now resumed
+            return not success
 
     def stop_recording(self):
         if hasattr(self, 'widget') and self.widget:
             self.widget.destroy()
             self.widget = None
         
-        # Get recording metadata before stopping
         result = self.recorder.stop()
         
-        self.deiconify()  # Bring back main window
-        
+        self.deiconify()
         self.rec_btn.configure(image=self.icon_rec, fg_color="transparent")
         self.timer_label.configure(text="00:00:00")
         
-        # Show notification
         if result:
+            from utils.notifications import show_recording_complete
             show_recording_complete(
                 filename=result.get("filename", "recording"),
                 path=result.get("path", ""),
@@ -644,62 +625,99 @@ class NeoRecorderApp(ctk.CTk):
 
     def update_timer(self):
         if self.recorder.is_recording:
-            # Use recorder's elapsed time (accounts for pauses)
             elapsed = int(self.recorder.get_elapsed_time())
             mins, secs = divmod(elapsed, 60)
             hrs, mins = divmod(mins, 60)
             self.timer_label.configure(text=f"{hrs:02d}:{mins:02d}:{secs:02d}")
-            self.after(500, self.update_timer)  # Update more frequently
+            self.after(500, self.update_timer)
 
     def update_vu_meter(self):
-        level = self.audio_manager.get_vu_level()
-        self.vu_meter.set_level(level)
-        self.after(50, self.update_vu_meter)
+        if hasattr(self, 'audio_manager') and hasattr(self, 'vu_meter'):
+            level = self.audio_manager.get_vu_level()
+            self.vu_meter.set_level(level)
+            self.after(50, self.update_vu_meter)
 
     def open_folder(self):
         os.startfile(self.recorder.get_output_dir())
 
+    def _open_quick_overlay(self):
+        if self.quick_overlay:
+            return
+        from gui.overlay import QuickOverlay
+        self.quick_overlay = QuickOverlay(
+            master=self,
+            on_screenshot=self._quick_screenshot,
+            on_record=self._quick_record,
+            on_close=self._on_quick_overlay_closed
+        )
+
+    def _on_quick_overlay_closed(self):
+        self.quick_overlay = None
+
+    def _quick_screenshot(self, rect):
+        try:
+            path = self.screenshot_capture.capture_region(rect)
+            if path:
+                size_mb = os.path.getsize(path) / (1024 * 1024)
+                size_str = f"{size_mb:.2f} MB"
+                from utils.notifications import show_simple_notification
+                show_simple_notification(self.t("screenshot_saved"), f"{os.path.basename(path)} ({size_str})")
+        except Exception as e:
+            print(f"Screenshot error: {e}")
+
+    def _quick_record(self, rect):
+        self.selected_rect = rect
+        self.recording_mode = "region"
+        self.start_recording()
+
+    def _minimize_to_tray(self):
+        """Minimize to system tray"""
+        if self.tray and self.tray.is_running:
+            self.withdraw()
+        else:
+            self.iconify()
+    
+    def _show_from_tray(self):
+        """Show window from tray"""
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
+    def _quit_app(self):
+        self.on_closing(force_quit=True)
+
     def on_closing(self, force_quit=False):
-        """Handle window close - minimize to tray or quit"""
-        # If tray is enabled and not force quit, minimize instead
         if not force_quit and self._settings.get("minimize_to_tray", True):
             if self.tray and self.tray.is_running:
                 self._minimize_to_tray()
                 return
-        
-        # Full cleanup and quit
         self._cleanup()
         self.destroy()
+        import os
+        os._exit(0)
     
     def _cleanup(self):
-        """Clean up all resources"""
-        # Save settings
         self._settings.set("language", self.current_lang)
         self._settings.set("fps", self.current_fps)
         self._settings.set("quality", self.current_quality)
         self._settings.set("last_mode", self.recording_mode)
         
-        # Stop recording if active
-        if self.recorder.is_recording:
+        if hasattr(self, 'recorder') and self.recorder and self.recorder.is_recording:
             self.recorder.stop()
         
-        # Stop hotkeys
-        if hasattr(self, 'hotkey_manager'):
+        if hasattr(self, 'hotkey_manager') and self.hotkey_manager:
             self.hotkey_manager.stop()
         
-        # Stop tray
-        if self.tray:
+        if hasattr(self, 'tray') and self.tray:
             self.tray.stop()
         
-        # Stop audio monitoring
-        self.audio_manager.stop_monitoring()
-        self.audio_manager.terminate()
+        if hasattr(self, 'audio_manager') and self.audio_manager:
+            self.audio_manager.stop_monitoring()
+            self.audio_manager.terminate()
         
-        # Cleanup screenshot
         if hasattr(self, 'screenshot_capture'):
             self.screenshot_capture.cleanup()
         
-        # Close widgets
         if hasattr(self, 'widget') and self.widget:
             try:
                 self.widget.destroy()

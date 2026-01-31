@@ -129,11 +129,25 @@ class SystemTray:
     
     def notify(self, title: str, message: str):
         """Show tray notification"""
+        import sys, os
+        log_path = os.path.join(os.path.dirname(sys.executable), "debug.log")
+        
+        def log(msg):
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"{msg}\n")
+        
+        log(f"[tray.notify] title={title}, message={message}")
+        log(f"[tray.notify] _icon={self._icon}")
+        log(f"[tray.notify] _icon.visible={self._icon.visible if self._icon else 'N/A'}")
+        
         if self._icon:
             try:
+                # pystray.Icon.notify(message, title) - note the order!
                 self._icon.notify(message, title)
-            except:
-                pass
+                log("[tray.notify] notify() succeeded")
+            except Exception as e:
+                log(f"[tray.notify] ERROR: {e}")
+                self._logger.error(f"Notify failed: {e}")
     
     @property
     def is_running(self) -> bool:
