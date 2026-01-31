@@ -332,16 +332,26 @@ class NeoRecorderApp(ctk.CTk):
         # Hide main window
         self.withdraw()
         
-        # Show floating widget with accurate elapsed time callback
+        # Show floating widget with callbacks for time and progress
         self.widget = RecordingWidget(
             self, 
             on_stop=self.stop_recording, 
             on_pause=self.on_pause_recording,
-            get_elapsed=self.recorder.get_elapsed_time
+            get_elapsed=self.recorder.get_elapsed_time,
+            get_progress=self.recorder.get_progress
         )
         
-        self.recorder.start(mode=self.recording_mode, rect=self.selected_rect, 
-                           mic=mic_name, system=system_audio)
+        result = self.recorder.start(mode=self.recording_mode, rect=self.selected_rect, 
+                                     mic=mic_name, system=system_audio)
+        
+        if not result:
+            # Recording failed to start
+            self.widget.destroy()
+            self.widget = None
+            self.deiconify()
+            self.rec_btn.configure(image=self.icon_rec, fg_color="transparent")
+            return
+        
         self.update_timer()
 
     def on_pause_recording(self, should_pause: bool) -> bool:
@@ -392,8 +402,22 @@ class NeoRecorderApp(ctk.CTk):
         os.startfile(self.recorder.get_output_dir())
 
     def on_closing(self):
+        """Clean up resources before closing"""
+        # Stop recording if active
+        if self.recorder.is_recording:
+            self.recorder.stop()
+        
+        # Stop audio monitoring
         self.audio_manager.stop_monitoring()
-        self.recorder.stop()
+        self.audio_manager.terminate()
+        
+        # Close any open widget
+        if hasattr(self, 'widget') and self.widget:
+            try:
+                self.widget.destroy()
+            except:
+                pass
+        
         self.destroy()
 
 if __name__ == "__main__":
