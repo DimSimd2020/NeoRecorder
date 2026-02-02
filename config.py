@@ -1,5 +1,5 @@
 """
-Configuration for NeoRecorder v1.4.3
+Configuration for NeoRecorder v1.4.8
 - User settings with persistence
 - Hotkey configuration
 - System tray settings
@@ -21,7 +21,7 @@ NEON_BLUE = "#00F2FF"
 
 # App Info
 APP_NAME = "NeoRecorder"
-VERSION = "1.4.7"
+VERSION = "1.4.8"
 AUTHOR = "DimSimd"
 
 

@@ -71,12 +71,18 @@ class FFmpegHandler:
         self._on_error = on_error
         self._on_progress = on_progress
 
+    def get_progress(self) -> RecordingProgress:
+        """Get current recording progress"""
+        return self._last_progress
+
     def get_available_encoders(self) -> List[str]:
-        """Detect available hardware encoders (cached)"""
+        """Detect available hardware encoders (cached) with actual test"""
         if self._available_encoders is not None:
             return self._available_encoders
         
         self._available_encoders = []
+        
+        # First get list of encoders from FFmpeg
         try:
             result = subprocess.run(
                 [FFMPEG_PATH, "-encoders", "-hide_banner"],
@@ -84,20 +90,50 @@ class FFmpegHandler:
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
             output = result.stdout
-            
-            if "h264_nvenc" in output:
-                self._available_encoders.append("h264_nvenc")
-            if "h264_qsv" in output:
-                self._available_encoders.append("h264_qsv")
-            if "h264_amf" in output:
-                self._available_encoders.append("h264_amf")
-            if "hevc_nvenc" in output:
-                self._available_encoders.append("hevc_nvenc")
-                
         except Exception as e:
             print(f"Error detecting encoders: {e}")
+            return self._available_encoders
+        
+        # Test each hardware encoder with an actual encoding attempt
+        hw_encoders = []
+        if "h264_nvenc" in output:
+            hw_encoders.append("h264_nvenc")
+        if "h264_qsv" in output:
+            hw_encoders.append("h264_qsv")
+        if "h264_amf" in output:
+            hw_encoders.append("h264_amf")
+        
+        for encoder in hw_encoders:
+            if self._test_encoder(encoder):
+                self._available_encoders.append(encoder)
+                print(f"Hardware encoder available: {encoder}")
         
         return self._available_encoders
+    
+    def _test_encoder(self, encoder: str) -> bool:
+        """Test if encoder actually works with real screen capture"""
+        try:
+            # Use gdigrab with small region for realistic test
+            # nullsrc doesn't work with some GPU encoders (AMF)
+            cmd = [
+                FFMPEG_PATH, "-y",
+                "-f", "gdigrab",
+                "-framerate", "30",
+                "-video_size", "640x480",
+                "-t", "0.5",
+                "-i", "desktop",
+                "-c:v", encoder,
+                "-f", "null", "-"
+            ]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
 
     def get_best_encoder(self) -> str:
         """Get the best available encoder (prefer hardware)"""
@@ -161,28 +197,18 @@ class FFmpegHandler:
         self.current_output = segment_path
         
         params = self._recording_params
+        
+        # Use gdigrab by default - it's more reliable
+        # ddagrab requires complex filter setup and often fails
         success = self._try_ffmpeg(
             segment_path,
-            "ddagrab",
+            "gdigrab",
             params["rect"],
             params["mic"],
             params["system"],
             params["framerate"],
             params["quality_preset"]
         )
-        
-        if not success:
-            print("ddagrab failed, falling back to gdigrab...")
-            fallback_fps = min(params["framerate"], 60)
-            success = self._try_ffmpeg(
-                segment_path,
-                "gdigrab",
-                params["rect"],
-                params["mic"],
-                params["system"],
-                fallback_fps,
-                params["quality_preset"]
-            )
         
         if success:
             self._is_recording = True
@@ -192,6 +218,26 @@ class FFmpegHandler:
         
         return success
 
+    def _get_gdigrab_resolution(self) -> tuple[int, int]:
+        """Get actual screen resolution via ffmpeg gdigrab probe"""
+        try:
+            cmd = [FFMPEG_PATH, "-f", "gdigrab", "-i", "desktop", "-t", "0.1", "-f", "null", "-"]
+            result = subprocess.run(
+                cmd, 
+                capture_output=True, 
+                text=True, 
+                encoding='utf-8', 
+                errors='ignore',
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            # Look for: Video: bmp, bgra, 5120x1440, ...
+            match = re.search(r'Video:.*,\s+(\d+)x(\d+)[,\s]', result.stderr)
+            if match:
+                return int(match.group(1)), int(match.group(2))
+        except Exception as e:
+            print(f"Error checking GDI resolution: {e}")
+        return 0, 0
+    
     def _try_ffmpeg(self, output_path: str, input_format: str, rect, mic, 
                    system, framerate, quality_preset) -> bool:
         """Build and execute FFmpeg command with proper resource management"""
@@ -199,11 +245,52 @@ class FFmpegHandler:
         quality = QUALITY_PRESETS.get(quality_preset, QUALITY_PRESETS["balanced"])
         encoder = self.get_best_encoder()
         
+        # Check actual capture resolution
+        capture_width = 0
+        if rect:
+            capture_width = rect[2] - rect[0]
+        else:
+            # For fullscreen, check what gdigrab actually sees
+            gw, gh = self._get_gdigrab_resolution()
+            if gw > 0:
+                capture_width = gw
+            else:
+                # Fallback to system metrics if probe failed
+                try:
+                    import ctypes
+                    # Force DPI awareness
+                    try:
+                        ctypes.windll.shcore.SetProcessDpiAwareness(2) # Per monitor aware
+                    except:
+                        try:
+                            ctypes.windll.user32.SetProcessDPIAware()
+                        except:
+                            pass
+                    capture_width = ctypes.windll.user32.GetSystemMetrics(0)
+                except:
+                    pass
+        
+        # AMF protection logic
+        if encoder == "h264_amf":
+            # 5120x1440 causes Access Violation on AMF. 
+            # Safe limit is usually 4096, but let's be safer with 3840.
+            if capture_width > 3840:
+                print(f"Resolution width {capture_width} too high for AMF, falling back to libx264")
+                encoder = "libx264"
+        
         cmd = [FFMPEG_PATH, "-y"]
         
         # Input options
+        
+        # GDI Safety: Cap FPS for high resolutions to prevent gdigrab crash (Error 1 or Access Violation)
+        # Windows GDI cannot handle > 60 FPS at 4K/Ultrawide resolutions reliably.
+        safe_framerate = framerate
+        if input_format == "gdigrab" and capture_width > 2560 and framerate > 60:
+            print(f"High-Res Warning: Capping gdigrab FPS to 60 for stability (requested {framerate})")
+            safe_framerate = 60
+            
         cmd.extend(["-f", input_format])
-        cmd.extend(["-framerate", str(framerate)])
+        cmd.extend(["-framerate", str(safe_framerate)])
         
         # Region capture
         if rect:
@@ -247,11 +334,18 @@ class FFmpegHandler:
                 "-global_quality", str(quality["crf"] + 5),
             ])
         elif encoder == "h264_amf":
+            # AMF crashes with QP=0 (Lossless) on some drivers/resolutions.
+            # Use safe high quality value instead.
+            amf_qp = quality["crf"]
+            if amf_qp < 12:
+                amf_qp = 12
+                
             cmd.extend([
-                "-quality", "speed",
+                "-usage", "lowlatency", # Optimize for realtime
                 "-rc", "cqp",
-                "-qp_i", str(quality["crf"]),
-                "-qp_p", str(quality["crf"]),
+                "-qp_i", str(amf_qp),
+                "-qp_p", str(amf_qp),
+                "-quality", "speed"
             ])
         
         cmd.extend([
@@ -295,10 +389,13 @@ class FFmpegHandler:
     def _start_output_monitor(self):
         """Start thread to monitor FFmpeg output and parse progress"""
         def monitor():
+            # Updated regex to handle FFmpeg's padded output format
+            # Example: frame=   19 fps=0.0 q=-0.0 size=       0KiB time=00:00:00.63 bitrate=   0.6kbits/s speed=1.25x
             progress_pattern = re.compile(
                 r'frame=\s*(\d+)\s+fps=\s*([\d.]+)\s+.*?size=\s*(\S+)\s+'
-                r'time=(\S+)\s+bitrate=\s*(\S+)\s+.*?speed=\s*(\S+)'
+                r'time=(\S+)\s+bitrate=\s*([\d.]+\S*)'
             )
+            speed_pattern = re.compile(r'speed=\s*([\d.]+x)')
             dropped_pattern = re.compile(r'drop\s*=\s*(\d+)', re.IGNORECASE)
             
             while self.process and self.process.poll() is None:
@@ -331,13 +428,18 @@ class FFmpegHandler:
                     # Parse progress
                     match = progress_pattern.search(line_str)
                     if match:
+                        speed = "N/A"
+                        speed_match = speed_pattern.search(line_str)
+                        if speed_match:
+                            speed = speed_match.group(1)
+
                         self._last_progress = RecordingProgress(
                             frame=int(match.group(1)),
                             fps=float(match.group(2)),
                             size=match.group(3),
                             time=match.group(4),
                             bitrate=match.group(5),
-                            speed=match.group(6)
+                            speed=speed
                         )
                         
                         # Check for dropped frames
@@ -600,24 +702,44 @@ class FFmpegHandler:
                 break
         return lines
 
-    @staticmethod
-    def get_audio_devices() -> str:
-        """Get list of audio devices via FFmpeg dshow"""
+    def get_dshow_audio_names(self) -> List[str]:
+        """Parse audio device names directly from FFmpeg dshow list"""
+        device_names = []
         try:
+            # -f dshow -i dummy lists devices. stderr contains the list.
             cmd = [FFMPEG_PATH, "-list_devices", "true", "-f", "dshow", "-i", "dummy"]
+            
             result = subprocess.run(
                 cmd, 
                 capture_output=True, 
+                encoding='utf-8', 
+                errors='ignore',
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
             
-            # FFmpeg outputs device list to stderr
-            for enc in ['utf-8', 'cp1251', 'cp866']:
-                try:
-                    return result.stderr.decode(enc)
-                except UnicodeDecodeError:
+            output = result.stderr
+            lines = output.split('\n')
+            
+            is_audio_section = False
+            for line in lines:
+                if "DirectShow audio devices" in line:
+                    is_audio_section = True
                     continue
-            return result.stderr.decode('utf-8', errors='ignore')
+                
+                if "DirectShow video devices" in line:
+                    is_audio_section = False
+                    break
+                
+                if is_audio_section and line.strip().startswith('[dshow') and '"' in line:
+                    # Extract name in quotes: [dshow @ ...]  "Microphone (Realtek)"
+                    match = re.search(r'"([^"]+)"', line)
+                    if match:
+                        name = match.group(1)
+                        # Filter out alternative names and duplicates
+                        if not name.startswith("@device") and name not in device_names:
+                            device_names.append(name)
+                            
         except Exception as e:
-            print(f"Error getting audio devices: {e}")
-            return ""
+            print(f"Error parsing dshow devices: {e}")
+            
+        return device_names

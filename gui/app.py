@@ -275,6 +275,14 @@ class SettingsWindow(ctk.CTkToplevel):
 
 class NeoRecorderApp(ctk.CTk):
     def __init__(self):
+        # Fix taskbar icon grouping and display
+        try:
+            import ctypes
+            myappid = f'dimsimd.neorecorder.app.{VERSION}' # Arbitrary unique ID
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except:
+            pass
+            
         super().__init__()
 
         self.title(APP_NAME)
@@ -339,6 +347,14 @@ class NeoRecorderApp(ctk.CTk):
         self.audio_manager = AudioManager()
         self.window_finder = WindowFinder()
         self.recorder = ScreenRecorder()
+        
+        # Apply save settings to recorder
+        self.recorder.set_fps(self.current_fps)
+        self.recorder.set_quality(self.current_quality)
+        saved_path = self._settings.get("output_dir")
+        if saved_path:
+            self.recorder.set_output_dir(saved_path)
+            
         self.screenshot_capture = get_screenshot_capture()
         self.hotkey_manager = get_hotkey_manager()
         
@@ -526,28 +542,62 @@ class NeoRecorderApp(ctk.CTk):
         self.btn_settings.pack(side="right", padx=20)
     
     def _load_audio_devices_thread(self):
-        """Load audio devices in background"""
+        """Load audio devices using FFmpeg for correct names"""
         try:
-            devices = self.audio_manager.get_input_devices()
-            names = [d['name'] for d in devices]
-            self.after(0, lambda: self._update_audio_ui(devices, names))
+            # 1. Get FFmpeg dshow names (Critical for recording stability)
+            ffmpeg_names = self.recorder.handler.get_dshow_audio_names()
+            
+            # 2. Get PyAudio devices (For VU Meter)
+            pyaudio_devices = self.audio_manager.get_input_devices()
+            
+            # 3. Update UI
+            if ffmpeg_names:
+                self.after(0, lambda: self._update_audio_ui(pyaudio_devices, ffmpeg_names))
+            elif pyaudio_devices:
+                 # Fallback if FFmpeg listing failed
+                 names = [d['name'] for d in pyaudio_devices]
+                 self.after(0, lambda: self._update_audio_ui(pyaudio_devices, names))
+            else:
+                 self.after(0, lambda: self._update_audio_ui([], []))
+                 
         except Exception as e:
             self._logger.error(f"Audio device load error: {e}")
 
     def _update_audio_ui(self, devices, names):
-        self.devices = devices
-        self.device_names = names
+        self.devices = devices  # PyAudio devices list
+        self.device_names = names # Names to show in UI
+        
         if names:
             self.device_combo.configure(values=names)
             self.device_combo.set(names[0])
-            try:
-                self.audio_manager.start_monitoring(devices[0]['index'])
-            except:
-                pass
+            # Try to start monitoring for default device
+            self._start_vu_monitoring(names[0])
         else:
             self.device_combo.configure(values=["No devices"])
             self.device_combo.set("No devices")
+        
         self.update_vu_meter()
+
+    def _start_vu_monitoring(self, selected_name):
+        """Try to find corresponding PyAudio device and start monitoring"""
+        try:
+            # Try exact match first
+            for dev in self.devices:
+                if dev['name'] == selected_name:
+                    self.audio_manager.start_monitoring(dev['index'])
+                    return
+
+            # Try partial match (FFmpeg name is usually shorter or cleaner)
+            # e.g. FFmpeg: "Microphone (Realtek Audio)" vs PyAudio: "Microphone (Realtek Audio) (2- High Definition...)"
+            for dev in self.devices:
+                if selected_name in dev['name'] or dev['name'] in selected_name:
+                    self.audio_manager.start_monitoring(dev['index'])
+                    return
+            
+            # Try cleaning names (remove brackets content if needed, but simple partial is usually enough)
+            
+        except Exception:
+            pass
 
     def set_mode(self, mode):
         self.recording_mode = mode
@@ -598,8 +648,15 @@ class NeoRecorderApp(ctk.CTk):
     def start_recording(self):
         self.rec_btn.configure(image=self.icon_stop, fg_color="#333333")
         
-        mic_name = self.device_combo.get() if self.mic_switch.get() else None
-        system_audio = self.sys_audio_switch.get()
+        # Gather params immediately
+        self.record_params = {
+            "mic": self.device_combo.get() if self.mic_switch.get() else None,
+            "system": self.sys_audio_switch.get()
+        }
+        
+        # Stop audio monitoring (VU meter) to free up device for recording
+        if hasattr(self, 'audio_manager'):
+            self.audio_manager.stop_monitoring()
         
         self.withdraw()
         
@@ -611,14 +668,31 @@ class NeoRecorderApp(ctk.CTk):
             get_elapsed=self.recorder.get_elapsed_time,
             get_progress=self.recorder.get_progress
         )
-        # Force widget to render before we start potentially blocking operations
-        self.widget.update()
         
-        # This starts recording asynchronously now (no sleep)
-        self.recorder.start(mode=self.recording_mode, rect=self.selected_rect, 
-                            mic=mic_name, system=system_audio)
+        # Start recording in background thread to absolutely prevent freezing
+        threading.Thread(target=self._start_recording_worker, daemon=True).start()
         
+        # Start timer speculatively, it will correct itself
         self.update_timer()
+
+    def _start_recording_worker(self):
+        """Background worker to start ffmpeg process"""
+        try:
+            result = self.recorder.start(
+                mode=self.recording_mode, 
+                rect=self.selected_rect, 
+                mic=self.record_params["mic"], 
+                system=self.record_params["system"]
+            )
+            
+            if not result:
+                # Failed synchronously
+                self.recorder.is_recording = False
+                self.after(0, lambda: self.on_recording_error("Failed to start recording process"))
+                
+        except Exception as e:
+            self.recorder.is_recording = False
+            self.after(0, lambda: self.on_recording_error(f"Startup error: {e}"))
 
     def on_pause_recording(self, should_pause: bool) -> bool:
         if should_pause:
@@ -639,13 +713,20 @@ class NeoRecorderApp(ctk.CTk):
         self.rec_btn.configure(image=self.icon_rec, fg_color="transparent")
         self.timer_label.configure(text="00:00:00")
         
+        # Results are shown
         if result:
             from utils.notifications import show_recording_complete
+            filename = result.get("filename", "recording")
+            duration = result.get("duration_formatted", "00:00")
             show_recording_complete(
-                filename=result.get("filename", "recording"),
-                path=result.get("path", ""),
-                duration=result.get("duration_formatted", "00:00")
+                f"Recording saved: {filename}",
+                f"Duration: {duration}"
             )
+            
+        # Restart audio monitoring if device selected
+        if hasattr(self, 'audio_manager') and hasattr(self, 'devices'):
+            current_name = self.device_combo.get()
+            self._start_vu_monitoring(current_name)
 
     def update_timer(self):
         if self.recorder.is_recording:

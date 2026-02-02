@@ -25,6 +25,12 @@ class RecordingWidget(ctk.CTkToplevel):
         self.get_elapsed = get_elapsed
         self.get_progress = get_progress  # Function to get RecordingProgress
         
+        # State - MUST be initialized BEFORE setup_ui() because _animate_indicator uses them
+        self.is_paused = False
+        self._pause_flash = False
+        self._update_id = None
+        self._progress_id = None
+        
         # Window setup
         self.overrideredirect(True)
         self.attributes("-topmost", True)
@@ -40,23 +46,18 @@ class RecordingWidget(ctk.CTkToplevel):
         self.bind("<ButtonPress-1>", self.start_move)
         self.bind("<B1-Motion>", self.do_move)
         
-        # State
-        self.is_paused = False
-        self._pause_flash = False
-        self._update_id = None
-        self._progress_id = None
-        
         # Start updates
         self.update_timer()
         self.update_progress()
 
     def set_exclusion(self):
         """Exclude window from screen capture (Windows 10 2004+)"""
-        try:
-            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
-            ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
-        except Exception as e:
-            print(f"Capture exclusion failed: {e}")
+        # try:
+        #     hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+        #     ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
+        # except Exception as e:
+        #     print(f"Capture exclusion failed: {e}")
+        pass
 
     def setup_ui(self):
         self.frame = ctk.CTkFrame(
@@ -220,9 +221,9 @@ class RecordingWidget(ctk.CTkToplevel):
         """Update progress display (FPS, bitrate, dropped)"""
         if not self.winfo_exists():
             return
-        
-        if self.get_progress and not self.is_paused:
-            try:
+
+        try:
+            if self.get_progress and not self.is_paused:
                 progress = self.get_progress()
                 
                 # FPS
@@ -248,9 +249,9 @@ class RecordingWidget(ctk.CTkToplevel):
                     self.dropped_label.configure(text=f"Dropped: {progress.dropped}")
                 else:
                     self.dropped_label.configure(text="")
-                    
-            except Exception as e:
-                print(f"Progress update error: {e}")
+        except Exception:
+            # Ignore transient errors during updates to prevent loop death
+            pass
         
         self._progress_id = self.after(500, self.update_progress)
 

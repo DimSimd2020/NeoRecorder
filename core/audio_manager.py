@@ -99,6 +99,10 @@ class AudioManager:
         # Reset level
         with self._lock:
             self.vu_level = 0
+            
+        # Give a small time for thread to exit
+        import time
+        time.sleep(0.1)
 
     def _monitor_thread(self, device_index: int):
         """Thread function for audio level monitoring"""
