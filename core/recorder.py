@@ -28,6 +28,7 @@ class ScreenRecorder:
         # Callbacks
         self._on_recording_complete: Optional[Callable[[Dict], None]] = None
         self._on_error: Optional[Callable[[str], None]] = None
+        self._on_warning: Optional[Callable[[str], None]] = None
         self._on_progress: Optional[Callable[[RecordingProgress], None]] = None
         
         # Thread safety
@@ -44,17 +45,19 @@ class ScreenRecorder:
         except Exception as e:
             print(f"Error creating output dir: {e}")
     
-    def set_callbacks(self, on_complete=None, on_error=None, on_progress=None):
+    def set_callbacks(self, on_complete=None, on_error=None, on_progress=None, on_warning=None):
         """Set callbacks for async events"""
         self._on_recording_complete = on_complete
         self._on_error = on_error
         self._on_progress = on_progress
+        self._on_warning = on_warning
         
         # Setup handler callbacks
         self.handler.set_callbacks(
             on_stopped=self._handle_recording_stopped,
             on_error=self._handle_error,
-            on_progress=self._handle_progress
+            on_progress=self._handle_progress,
+            on_warning=self._handle_warning
         )
     
     def _handle_recording_stopped(self, result: Dict):
@@ -67,6 +70,12 @@ class ScreenRecorder:
         print(f"Recording error: {error}")
         if self._on_error:
             self._on_error(error)
+
+    def _handle_warning(self, message: str):
+        """Internal handler for warnings"""
+        print(f"Recording warning: {message}")
+        if self._on_warning:
+            self._on_warning(message)
     
     def _handle_progress(self, progress: RecordingProgress):
         """Internal handler for progress updates"""

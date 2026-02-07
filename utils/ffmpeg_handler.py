@@ -1,8 +1,9 @@
 """
-FFmpeg Handler v1.3.0 for NeoRecorder.
+FFmpeg Handler v1.4.0 for NeoRecorder.
 - Segment-based pause (no NtSuspend risks)
 - Real-time progress monitoring (fps, bitrate, frame count)
 - Robust error handling and resource cleanup
+- Automatic Fault Tolerance (Safe Mode Fallback)
 """
 
 import subprocess
@@ -12,11 +13,17 @@ import threading
 import queue
 import re
 import tempfile
+import platform
 from typing import Optional, Dict, Callable, List
 from dataclasses import dataclass
 from config import FFMPEG_PATH, QUALITY_PRESETS, USE_HARDWARE_ENCODER
 from utils.logger import get_logger, log_ffmpeg_output, log_error, log_debug
 
+# Define creation flags for Windows
+if platform.system() == "Windows":
+    CREATION_FLAGS = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+else:
+    CREATION_FLAGS = 0
 
 @dataclass
 class RecordingProgress:
@@ -55,6 +62,7 @@ class FFmpegHandler:
         
         # Callbacks
         self._on_error: Optional[Callable[[str], None]] = None
+        self._on_warning: Optional[Callable[[str], None]] = None
         self._on_started: Optional[Callable[[], None]] = None
         self._on_stopped: Optional[Callable[[Dict], None]] = None
         self._on_progress: Optional[Callable[[RecordingProgress], None]] = None
@@ -63,13 +71,15 @@ class FFmpegHandler:
         self._output_queue: queue.Queue = queue.Queue()
         self._last_progress: RecordingProgress = RecordingProgress()
         self._log_file = None
+        self._safe_mode_active = False
 
-    def set_callbacks(self, on_started=None, on_stopped=None, on_error=None, on_progress=None):
+    def set_callbacks(self, on_started=None, on_stopped=None, on_error=None, on_progress=None, on_warning=None):
         """Set callback functions for async events"""
         self._on_started = on_started
         self._on_stopped = on_stopped
         self._on_error = on_error
         self._on_progress = on_progress
+        self._on_warning = on_warning
 
     def get_progress(self) -> RecordingProgress:
         """Get current recording progress"""
@@ -87,7 +97,7 @@ class FFmpegHandler:
             result = subprocess.run(
                 [FFMPEG_PATH, "-encoders", "-hide_banner"],
                 capture_output=True, text=True, timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW
+                creationflags=CREATION_FLAGS
             )
             output = result.stdout
         except Exception as e:
@@ -129,7 +139,7 @@ class FFmpegHandler:
                 cmd,
                 capture_output=True,
                 timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW
+                creationflags=CREATION_FLAGS
             )
             return result.returncode == 0
         except Exception:
@@ -137,6 +147,10 @@ class FFmpegHandler:
 
     def get_best_encoder(self) -> str:
         """Get the best available encoder (prefer hardware)"""
+        # If safe mode was triggered previously, stick to libx264
+        if self._safe_mode_active:
+            return "libx264"
+
         if not USE_HARDWARE_ENCODER:
             return "libx264"
         
@@ -165,6 +179,7 @@ class FFmpegHandler:
         self._segments = []
         self._segment_index = 0
         self._final_output = output_path
+        self._safe_mode_active = False # Reset safe mode on fresh start
         
         # Create temp directory for segments
         self._temp_dir = tempfile.mkdtemp(prefix="neorecorder_")
@@ -184,7 +199,7 @@ class FFmpegHandler:
         return self._start_segment()
 
     def _start_segment(self) -> bool:
-        """Start a new recording segment"""
+        """Start a new recording segment with fault tolerance"""
         if not self._temp_dir or not self._recording_params:
             return False
         
@@ -198,9 +213,8 @@ class FFmpegHandler:
         
         params = self._recording_params
         
-        # Use gdigrab by default - it's more reliable
-        # ddagrab requires complex filter setup and often fails
-        success = self._try_ffmpeg(
+        # Attempt recording with retry logic
+        success = self._try_ffmpeg_with_retry(
             segment_path,
             "gdigrab",
             params["rect"],
@@ -218,6 +232,35 @@ class FFmpegHandler:
         
         return success
 
+    def _try_ffmpeg_with_retry(self, output_path: str, input_format: str, rect, mic,
+                              system, framerate, quality_preset) -> bool:
+        """
+        Try to start FFmpeg. If it fails immediately, switch to safe mode (libx264)
+        and try again.
+        """
+        # First attempt
+        if self._launch_ffmpeg(output_path, input_format, rect, mic, system, framerate, quality_preset):
+            return True
+
+        # If already in safe mode, we can't do much more
+        if self._safe_mode_active:
+            print("Safe mode recording also failed.")
+            return False
+
+        # Fallback to safe mode
+        print("Hardware encoding failed. Switching to Safe Mode (CPU encoding)...")
+        if self._on_warning:
+            self._on_warning("Switching to Safe Mode (Software Encoding) due to hardware error.")
+
+        self._safe_mode_active = True
+
+        # Retry with libx264 and potentially safer settings
+        if self._launch_ffmpeg(output_path, input_format, rect, mic, system, framerate, quality_preset, force_safe=True):
+            print("Safe Mode recording started successfully.")
+            return True
+
+        return False
+
     def _get_gdigrab_resolution(self) -> tuple[int, int]:
         """Get actual screen resolution via ffmpeg gdigrab probe"""
         try:
@@ -228,7 +271,7 @@ class FFmpegHandler:
                 text=True, 
                 encoding='utf-8', 
                 errors='ignore',
-                creationflags=subprocess.CREATE_NO_WINDOW
+                creationflags=CREATION_FLAGS
             )
             # Look for: Video: bmp, bgra, 5120x1440, ...
             match = re.search(r'Video:.*,\s+(\d+)x(\d+)[,\s]', result.stderr)
@@ -238,12 +281,16 @@ class FFmpegHandler:
             print(f"Error checking GDI resolution: {e}")
         return 0, 0
     
-    def _try_ffmpeg(self, output_path: str, input_format: str, rect, mic, 
-                   system, framerate, quality_preset) -> bool:
+    def _launch_ffmpeg(self, output_path: str, input_format: str, rect, mic,
+                      system, framerate, quality_preset, force_safe=False) -> bool:
         """Build and execute FFmpeg command with proper resource management"""
         
         quality = QUALITY_PRESETS.get(quality_preset, QUALITY_PRESETS["balanced"])
-        encoder = self.get_best_encoder()
+        encoder = "libx264" if force_safe else self.get_best_encoder()
+
+        # In safe mode, force ultrafast to reduce CPU load
+        if force_safe:
+            quality = QUALITY_PRESETS["ultrafast"]
         
         # Check actual capture resolution
         capture_width = 0
@@ -282,8 +329,7 @@ class FFmpegHandler:
         
         # Input options
         
-        # GDI Safety: Cap FPS for high resolutions to prevent gdigrab crash (Error 1 or Access Violation)
-        # Windows GDI cannot handle > 60 FPS at 4K/Ultrawide resolutions reliably.
+        # GDI Safety: Cap FPS for high resolutions to prevent gdigrab crash
         safe_framerate = framerate
         if input_format == "gdigrab" and capture_width > 2560 and framerate > 60:
             print(f"High-Res Warning: Capping gdigrab FPS to 60 for stability (requested {framerate})")
@@ -299,6 +345,11 @@ class FFmpegHandler:
             # Ensure even dimensions
             w = w if w % 2 == 0 else w - 1
             h = h if h % 2 == 0 else h - 1
+
+            # Sanity check for negative coordinates
+            if x < 0 or y < 0:
+                print(f"Warning: Negative coordinates detected ({x}, {y}). This may cause issues on secondary monitors.")
+
             cmd.extend([
                 "-offset_x", str(x),
                 "-offset_y", str(y),
@@ -316,7 +367,7 @@ class FFmpegHandler:
         
         if encoder == "libx264":
             cmd.extend([
-                "-preset", quality["preset"],
+                "-preset", "ultrafast" if force_safe else quality["preset"],
                 "-tune", "zerolatency",
                 "-crf", str(quality["crf"]),
             ])
@@ -335,7 +386,6 @@ class FFmpegHandler:
             ])
         elif encoder == "h264_amf":
             # AMF crashes with QP=0 (Lossless) on some drivers/resolutions.
-            # Use safe high quality value instead.
             amf_qp = quality["crf"]
             if amf_qp < 12:
                 amf_qp = 12
@@ -355,13 +405,15 @@ class FFmpegHandler:
         
         cmd.append(output_path)
 
-        # Setup logging
+        # Log preparation
         log_path = output_path + ".log"
         try:
             self._log_file = open(log_path, "w", encoding="utf-8")
-            self._log_file.write(f"Encoder: {encoder}\n")
-            self._log_file.write(f"FPS: {framerate}\n")
-            self._log_file.write(f"Quality: {quality_preset}\n")
+            self._log_file.write(f"NeoRecorder Fault Tolerance Log\n")
+            self._log_file.write(f"System: {platform.system()} {platform.release()}\n")
+            self._log_file.write(f"Timestamp: {time.ctime()}\n")
+            self._log_file.write(f"Encoder: {encoder} (Safe Mode: {force_safe})\n")
+            self._log_file.write(f"Resolution Width: {capture_width}\n")
             self._log_file.write(f"Command: {' '.join(cmd)}\n\n")
             self._log_file.flush()
         except Exception as e:
@@ -374,13 +426,31 @@ class FFmpegHandler:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+                creationflags=CREATION_FLAGS
             )
         except Exception as e:
             print(f"Failed to start FFmpeg: {e}")
+            if self._log_file:
+                self._log_file.write(f"Popen Exception: {e}\n")
             self._close_log_file()
             return False
         
+        # Immediate health check (wait 0.5s to see if it crashes immediately)
+        try:
+            time.sleep(0.5)
+            if self.process.poll() is not None:
+                # Crashed immediately
+                returncode = self.process.returncode
+                err_out = self.process.stderr.read().decode('utf-8', errors='ignore')
+                print(f"FFmpeg crashed immediately with code {returncode}")
+                if self._log_file:
+                    self._log_file.write(f"Immediate crash code: {returncode}\n")
+                    self._log_file.write(f"Stderr:\n{err_out}\n")
+                self._close_log_file()
+                return False
+        except Exception as e:
+            print(f"Health check error: {e}")
+
         # Start progress monitor
         self._start_output_monitor()
         
@@ -461,6 +531,7 @@ class FFmpegHandler:
             # Process ended - check for errors
             if self.process:
                 returncode = self.process.returncode
+                # If exit code is non-zero and we are NOT manually paused
                 if returncode is not None and returncode != 0 and not self._is_paused:
                     # Read remaining stderr
                     try:
@@ -517,7 +588,7 @@ class FFmpegHandler:
         
         self._is_paused = False
         
-        # Start new segment
+        # Start new segment (will reuse safe_mode if active)
         success = self._start_segment()
         if success:
             print(f"Recording resumed (new segment {self._segment_index - 1})")
@@ -587,6 +658,7 @@ class FFmpegHandler:
         # Reset state
         self._is_recording = False
         self._is_paused = False
+        self._safe_mode_active = False
         self.current_output = None
         self.start_timestamp = None
         self._total_pause_duration = 0.0
@@ -639,7 +711,7 @@ class FFmpegHandler:
             result = subprocess.run(
                 cmd,
                 capture_output=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=CREATION_FLAGS,
                 timeout=300
             )
             
@@ -714,7 +786,7 @@ class FFmpegHandler:
                 capture_output=True, 
                 encoding='utf-8', 
                 errors='ignore',
-                creationflags=subprocess.CREATE_NO_WINDOW
+                creationflags=CREATION_FLAGS
             )
             
             output = result.stderr

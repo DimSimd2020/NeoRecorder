@@ -361,7 +361,8 @@ class NeoRecorderApp(ctk.CTk):
         # Register recorder callbacks
         self.recorder.set_callbacks(
             on_error=self.on_recording_error,
-            on_complete=self.on_recording_complete_event
+            on_complete=self.on_recording_complete_event,
+            on_warning=self.on_recording_warning
         )
         
         # State
@@ -372,6 +373,11 @@ class NeoRecorderApp(ctk.CTk):
         self.widget = None
         self.quick_overlay = None
         self.tray = None
+
+    def on_recording_warning(self, message):
+        """Handle recording warning from backend"""
+        from utils.notifications import show_warning_notification
+        self.after(0, lambda: show_warning_notification("Note", message))
 
     def on_recording_error(self, error):
         """Handle recording error from backend"""
