@@ -191,3 +191,8 @@ def show_simple_notification(title: str, message: str):
 def show_error_notification(title: str, message: str):
     """Show error notification"""
     NeoToast.show(title, message, icon="❌", duration=5.0)
+
+
+def show_warning_notification(title: str, message: str):
+    """Show warning notification"""
+    NeoToast.show(title, message, icon="⚠️", duration=6.0)
