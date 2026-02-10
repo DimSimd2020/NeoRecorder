@@ -10,6 +10,11 @@ class VUMeter(ctk.CTkFrame):
         self.level = 0
         self.width = width
         self.height = height
+
+        # Initialize canvas items
+        self.bg_rect = self.canvas.create_rectangle(0, 0, self.width, self.height, fill="#3D3D3D", outline="")
+        self.level_rect = self.canvas.create_rectangle(0, 0, 0, self.height, fill=NEON_BLUE, outline="")
+
         self._draw_meter()
 
     def set_level(self, level):
@@ -18,9 +23,8 @@ class VUMeter(ctk.CTkFrame):
         self._draw_meter()
 
     def _draw_meter(self, *args, **kwargs):
-        self.canvas.delete("all")
-        # Background bar
-        self.canvas.create_rectangle(0, 0, self.width, self.height, fill="#3D3D3D", outline="")
+        # Update Background bar (in case width/height changed)
+        self.canvas.coords(self.bg_rect, 0, 0, self.width, self.height)
         # Level bar
         fill_width = self.level * self.width
-        self.canvas.create_rectangle(0, 0, fill_width, self.height, fill=NEON_BLUE, outline="")
+        self.canvas.coords(self.level_rect, 0, 0, fill_width, self.height)
