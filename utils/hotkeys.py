@@ -16,10 +16,11 @@ class HotkeyManager:
     
     def __init__(self):
         self._hotkeys: Dict[str, int] = {}  # hotkey_string -> hook_id
+        self._registered_keys: Dict[str, str] = {}
         self._callbacks: Dict[str, Callable] = {}
         self._keyboard = None
         self._running = False
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._logger = get_logger()
     
     def _ensure_keyboard(self):
@@ -54,7 +55,7 @@ class HotkeyManager:
         with self._lock:
             # Unregister existing hotkey for this action
             if action_name and action_name in self._callbacks:
-                self.unregister(action_name)
+                self._unregister_locked(action_name)
             
             try:
                 # Normalize hotkey format
@@ -69,6 +70,7 @@ class HotkeyManager:
                 
                 key = action_name or hotkey
                 self._hotkeys[key] = hook_id
+                self._registered_keys[key] = hotkey
                 self._callbacks[key] = callback
                 self._running = True
                 
@@ -78,6 +80,21 @@ class HotkeyManager:
             except Exception as e:
                 self._logger.error(f"Failed to register hotkey {hotkey}: {e}")
                 return False
+
+    def _unregister_locked(self, action_or_hotkey: str) -> bool:
+        """Unregister hotkey while lock is already held"""
+        if action_or_hotkey not in self._hotkeys:
+            return False
+
+        try:
+            self._keyboard.remove_hotkey(self._hotkeys[action_or_hotkey])
+            del self._hotkeys[action_or_hotkey]
+            self._registered_keys.pop(action_or_hotkey, None)
+            self._callbacks.pop(action_or_hotkey, None)
+            return True
+        except Exception as e:
+            self._logger.error(f"Failed to unregister hotkey: {e}")
+            return False
     
     def unregister(self, action_or_hotkey: str) -> bool:
         """Unregister a hotkey by action name or hotkey string"""
@@ -85,16 +102,7 @@ class HotkeyManager:
             return False
         
         with self._lock:
-            if action_or_hotkey in self._hotkeys:
-                try:
-                    self._keyboard.remove_hotkey(self._hotkeys[action_or_hotkey])
-                    del self._hotkeys[action_or_hotkey]
-                    if action_or_hotkey in self._callbacks:
-                        del self._callbacks[action_or_hotkey]
-                    return True
-                except Exception as e:
-                    self._logger.error(f"Failed to unregister hotkey: {e}")
-            return False
+            return self._unregister_locked(action_or_hotkey)
     
     def unregister_all(self):
         """Unregister all hotkeys"""
@@ -108,6 +116,7 @@ class HotkeyManager:
                 except:
                     pass
             self._hotkeys.clear()
+            self._registered_keys.clear()
             self._callbacks.clear()
             self._running = False
     
@@ -117,7 +126,7 @@ class HotkeyManager:
     
     def get_registered_hotkeys(self) -> Dict[str, str]:
         """Get dict of action_name -> hotkey_string"""
-        return {k: str(v) for k, v in self._hotkeys.items()}
+        return self._registered_keys.copy()
     
     def stop(self):
         """Stop all hotkey listening and cleanup"""

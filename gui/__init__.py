@@ -1,0 +1,1 @@
+"""NeoRecorder GUI package."""

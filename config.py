@@ -10,14 +10,15 @@ Configuration for NeoRecorder v1.4.8
 import os
 import sys
 import json
+from copy import deepcopy
 from typing import Dict, Any
 
 # UI Colors
-BG_COLOR = "#2B2B2B"
-ACCENT_COLOR = "#1F6AA5"
-TEXT_COLOR = "#FFFFFF"
-SECONDARY_TEXT_COLOR = "#A0A0A0"
-NEON_BLUE = "#00F2FF"
+BG_COLOR = "#09131B"
+ACCENT_COLOR = "#27C1F4"
+TEXT_COLOR = "#F4FBFF"
+SECONDARY_TEXT_COLOR = "#86A2B6"
+NEON_BLUE = "#27C1F4"
 
 # App Info
 APP_NAME = "NeoRecorder"
@@ -96,7 +97,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "minimize_to_tray": True,
     "start_minimized": False,
     "start_with_windows": False,
-    "hotkeys": DEFAULT_HOTKEYS.copy(),
+    "hotkeys": deepcopy(DEFAULT_HOTKEYS),
     "last_mode": "screen",
     # Overlay settings
     "overlay_dim_screen": True,
@@ -123,7 +124,7 @@ class Settings:
     def _load(self):
         """Load settings from file"""
         self._ensure_dirs()
-        self._data = DEFAULT_SETTINGS.copy()
+        self._data = deepcopy(DEFAULT_SETTINGS)
         
         if os.path.exists(SETTINGS_FILE):
             try:
@@ -165,14 +166,14 @@ class Settings:
     def set_hotkey(self, action: str, hotkey: str):
         """Set hotkey for action"""
         if "hotkeys" not in self._data:
-            self._data["hotkeys"] = DEFAULT_HOTKEYS.copy()
+            self._data["hotkeys"] = deepcopy(DEFAULT_HOTKEYS)
         self._data["hotkeys"][action] = hotkey
         self.save()
     
     @property
     def all(self) -> Dict[str, Any]:
         """Get all settings"""
-        return self._data.copy()
+        return deepcopy(self._data)
 
 
 # Global settings instance

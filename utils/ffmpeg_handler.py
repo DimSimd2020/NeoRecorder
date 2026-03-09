@@ -17,6 +17,13 @@ from dataclasses import dataclass
 from config import FFMPEG_PATH, QUALITY_PRESETS, USE_HARDWARE_ENCODER
 from utils.logger import get_logger, log_ffmpeg_output, log_error, log_debug
 
+ENCODER_PRIORITY = ("h264_nvenc", "h264_qsv", "h264_amf")
+ENCODER_LIMITS = {
+    "h264_nvenc": {"max_width": None, "max_fps": 240},
+    "h264_qsv": {"max_width": 4096, "max_fps": 144},
+    "h264_amf": {"max_width": 3840, "max_fps": 120},
+}
+
 
 @dataclass
 class RecordingProgress:
@@ -30,10 +37,21 @@ class RecordingProgress:
     dropped: int = 0
 
 
+@dataclass(frozen=True)
+class EncoderDecision:
+    """Resolved capture and encoder profile."""
+
+    rect: Optional[tuple[int, int, int, int]]
+    capture_width: int
+    safe_framerate: int
+    candidates: tuple[str, ...]
+
+
 class FFmpegHandler:
     def __init__(self):
         self.process: Optional[subprocess.Popen] = None
         self.current_output: Optional[str] = None
+        self.current_encoder: Optional[str] = None
         self.start_timestamp: Optional[float] = None
         self._available_encoders: Optional[list] = None
         
@@ -137,19 +155,10 @@ class FFmpegHandler:
 
     def get_best_encoder(self) -> str:
         """Get the best available encoder (prefer hardware)"""
-        if not USE_HARDWARE_ENCODER:
-            return "libx264"
-        
-        encoders = self.get_available_encoders()
-        priority = ["h264_nvenc", "h264_qsv", "h264_amf"]
-        
-        for enc in priority:
-            if enc in encoders:
-                return enc
-        
-        return "libx264"
+        return self._encoder_candidates(capture_width=0, framerate=60)[0]
 
     def start_recording(self, output_path: str, rect=None, mic=None, system=False,
+                       scene_plan=None,
                        framerate=60, quality_preset="balanced") -> bool:
         """
         Start recording. Uses segment-based approach for reliable pause.
@@ -174,6 +183,7 @@ class FFmpegHandler:
             "rect": rect,
             "mic": mic,
             "system": system,
+            "scene_plan": scene_plan,
             "framerate": framerate,
             "quality_preset": quality_preset
         }
@@ -181,7 +191,25 @@ class FFmpegHandler:
         self.start_timestamp = time.time()
         
         # Start first segment
-        return self._start_segment()
+        success = self._start_segment()
+        if success:
+            return True
+
+        self._cleanup_failed_start()
+        return False
+
+    def _cleanup_failed_start(self):
+        """Reset state after a failed recording start"""
+        self._close_log_file()
+        self._cleanup_temp()
+        self.current_output = None
+        self.current_encoder = None
+        self.start_timestamp = None
+        self._recording_params = None
+        self._final_output = None
+        self._segments = []
+        self._segment_index = 0
+        self._is_recording = False
 
     def _start_segment(self) -> bool:
         """Start a new recording segment"""
@@ -193,8 +221,6 @@ class FFmpegHandler:
             self._temp_dir, 
             f"segment_{self._segment_index:04d}.mp4"
         )
-        self._segments.append(segment_path)
-        self.current_output = segment_path
         
         params = self._recording_params
         
@@ -206,17 +232,22 @@ class FFmpegHandler:
             params["rect"],
             params["mic"],
             params["system"],
+            params.get("scene_plan"),
             params["framerate"],
             params["quality_preset"]
         )
         
-        if success:
-            self._is_recording = True
-            self._segment_index += 1
-            if self._on_started:
-                self._on_started()
-        
-        return success
+        if not success:
+            self.current_output = None
+            return False
+
+        self.current_output = segment_path
+        self._segments.append(segment_path)
+        self._is_recording = True
+        self._segment_index += 1
+        if self._on_started:
+            self._on_started()
+        return True
 
     def _get_gdigrab_resolution(self) -> tuple[int, int]:
         """Get actual screen resolution via ffmpeg gdigrab probe"""
@@ -238,153 +269,276 @@ class FFmpegHandler:
             print(f"Error checking GDI resolution: {e}")
         return 0, 0
     
-    def _try_ffmpeg(self, output_path: str, input_format: str, rect, mic, 
-                   system, framerate, quality_preset) -> bool:
+    def _try_ffmpeg(self, output_path: str, input_format: str, rect, mic,
+                   system, scene_plan, framerate, quality_preset) -> bool:
         """Build and execute FFmpeg command with proper resource management"""
-        
         quality = QUALITY_PRESETS.get(quality_preset, QUALITY_PRESETS["balanced"])
-        encoder = self.get_best_encoder()
-        
-        # Check actual capture resolution
-        capture_width = 0
+        decision = self._build_encoder_decision(input_format, rect, framerate)
+
+        for encoder in decision.candidates:
+            cmd = self._build_ffmpeg_command(
+                output_path,
+                input_format,
+                decision.rect,
+                mic,
+                scene_plan,
+                decision.safe_framerate,
+                quality,
+                encoder,
+            )
+            if self._launch_ffmpeg(
+                cmd,
+                output_path,
+                encoder,
+                framerate,
+                decision.safe_framerate,
+                quality_preset,
+                decision.capture_width,
+            ):
+                return True
+
+        self.current_encoder = None
+        return False
+
+    def _build_encoder_decision(self, input_format, rect, framerate) -> EncoderDecision:
+        normalized_rect = self._normalize_rect(rect)
+        capture_width = self._resolve_capture_width(normalized_rect)
+        safe_framerate = self._resolve_safe_framerate(input_format, capture_width, framerate)
+        candidates = tuple(self._encoder_candidates(capture_width, safe_framerate))
+        return EncoderDecision(normalized_rect, capture_width, safe_framerate, candidates)
+
+    def _normalize_rect(self, rect):
+        if not rect:
+            return None
+        x1, y1, x2, y2 = rect
+        left = min(x1, x2)
+        top = min(y1, y2)
+        width = max(2, abs(x2 - x1))
+        height = max(2, abs(y2 - y1))
+        width = width if width % 2 == 0 else width - 1
+        height = height if height % 2 == 0 else height - 1
+        return (left, top, left + width, top + height)
+
+    def _resolve_capture_width(self, rect) -> int:
         if rect:
-            capture_width = rect[2] - rect[0]
-        else:
-            # For fullscreen, check what gdigrab actually sees
-            gw, gh = self._get_gdigrab_resolution()
-            if gw > 0:
-                capture_width = gw
-            else:
-                # Fallback to system metrics if probe failed
+            return rect[2] - rect[0]
+        width, _height = self._get_gdigrab_resolution()
+        if width > 0:
+            return width
+        return self._system_width()
+
+    @staticmethod
+    def _system_width() -> int:
+        try:
+            import ctypes
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            except Exception:
                 try:
-                    import ctypes
-                    # Force DPI awareness
-                    try:
-                        ctypes.windll.shcore.SetProcessDpiAwareness(2) # Per monitor aware
-                    except:
-                        try:
-                            ctypes.windll.user32.SetProcessDPIAware()
-                        except:
-                            pass
-                    capture_width = ctypes.windll.user32.GetSystemMetrics(0)
-                except:
+                    ctypes.windll.user32.SetProcessDPIAware()
+                except Exception:
                     pass
-        
-        # AMF protection logic
-        if encoder == "h264_amf":
-            # 5120x1440 causes Access Violation on AMF. 
-            # Safe limit is usually 4096, but let's be safer with 3840.
-            if capture_width > 3840:
-                print(f"Resolution width {capture_width} too high for AMF, falling back to libx264")
-                encoder = "libx264"
-        
-        cmd = [FFMPEG_PATH, "-y"]
-        
-        # Input options
-        
-        # GDI Safety: Cap FPS for high resolutions to prevent gdigrab crash (Error 1 or Access Violation)
-        # Windows GDI cannot handle > 60 FPS at 4K/Ultrawide resolutions reliably.
-        safe_framerate = framerate
+            return ctypes.windll.user32.GetSystemMetrics(0)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _resolve_safe_framerate(input_format, capture_width, framerate) -> int:
         if input_format == "gdigrab" and capture_width > 2560 and framerate > 60:
             print(f"High-Res Warning: Capping gdigrab FPS to 60 for stability (requested {framerate})")
-            safe_framerate = 60
-            
-        cmd.extend(["-f", input_format])
-        cmd.extend(["-framerate", str(safe_framerate)])
-        
-        # Region capture
-        if rect:
-            x, y, x2, y2 = rect
-            w, h = x2 - x, y2 - y
-            # Ensure even dimensions
-            w = w if w % 2 == 0 else w - 1
-            h = h if h % 2 == 0 else h - 1
-            cmd.extend([
-                "-offset_x", str(x),
-                "-offset_y", str(y),
-                "-video_size", f"{w}x{h}"
-            ])
-            
-        cmd.extend(["-i", "desktop"])
+            return 60
+        return framerate
 
-        # Microphone input
+    def _encoder_candidates(self, capture_width: int, framerate: int) -> List[str]:
+        if not USE_HARDWARE_ENCODER:
+            return ["libx264"]
+
+        available = set(self.get_available_encoders())
+        candidates = [
+            encoder
+            for encoder in ENCODER_PRIORITY
+            if encoder in available and self._is_encoder_compatible(encoder, capture_width, framerate)
+        ]
+        candidates.append("libx264")
+        return candidates
+
+    @staticmethod
+    def _is_encoder_compatible(encoder: str, capture_width: int, framerate: int) -> bool:
+        limits = ENCODER_LIMITS.get(encoder)
+        if not limits:
+            return True
+        max_width = limits["max_width"]
+        max_fps = limits["max_fps"]
+        if max_width is not None and capture_width > max_width:
+            return False
+        return framerate <= max_fps
+
+    def _build_ffmpeg_command(self, output_path, input_format, rect, mic, scene_plan, framerate, quality, encoder):
+        capture_rects = self._capture_rects(rect, scene_plan)
+        cmd = [FFMPEG_PATH, "-y"]
+        cmd.extend(self._video_input_args(input_format, framerate, capture_rects))
+        audio_index = len(capture_rects)
         if mic:
             cmd.extend(["-f", "dshow", "-i", f"audio={mic}"])
-
-        # Video encoding
+        cmd.extend(self._filter_args(scene_plan, capture_rects, mic is not None, audio_index))
         cmd.extend(["-c:v", encoder])
-        
-        if encoder == "libx264":
-            cmd.extend([
-                "-preset", quality["preset"],
-                "-tune", "zerolatency",
-                "-crf", str(quality["crf"]),
-            ])
-        elif encoder == "h264_nvenc":
-            cmd.extend([
-                "-preset", "p4",
-                "-tune", "ll",
-                "-rc", "vbr",
-                "-cq", str(quality["crf"] + 5),
-                "-b:v", "0",
-            ])
-        elif encoder == "h264_qsv":
-            cmd.extend([
-                "-preset", "faster",
-                "-global_quality", str(quality["crf"] + 5),
-            ])
-        elif encoder == "h264_amf":
-            # AMF crashes with QP=0 (Lossless) on some drivers/resolutions.
-            # Use safe high quality value instead.
-            amf_qp = quality["crf"]
-            if amf_qp < 12:
-                amf_qp = 12
-                
-            cmd.extend([
-                "-usage", "lowlatency", # Optimize for realtime
-                "-rc", "cqp",
-                "-qp_i", str(amf_qp),
-                "-qp_p", str(amf_qp),
-                "-quality", "speed"
-            ])
-        
-        cmd.extend([
-            "-pix_fmt", "yuv420p",
-            "-vsync", "cfr",
-        ])
-        
-        cmd.append(output_path)
+        cmd.extend(self._video_args(encoder, quality))
+        cmd.extend(["-pix_fmt", "yuv420p", "-vsync", "cfr", output_path])
+        return cmd
 
-        # Setup logging
-        log_path = output_path + ".log"
-        try:
-            self._log_file = open(log_path, "w", encoding="utf-8")
-            self._log_file.write(f"Encoder: {encoder}\n")
-            self._log_file.write(f"FPS: {framerate}\n")
-            self._log_file.write(f"Quality: {quality_preset}\n")
-            self._log_file.write(f"Command: {' '.join(cmd)}\n\n")
-            self._log_file.flush()
-        except Exception as e:
-            print(f"Failed to create log file: {e}")
-            self._log_file = None
-        
+    @staticmethod
+    def _capture_rects(rect, scene_plan):
+        if scene_plan is None or not scene_plan.overlays:
+            return [rect]
+
+        rects = [scene_plan.primary_video.rect]
+        rects.extend(layer.rect for layer in FFmpegHandler._overlay_layers(scene_plan))
+        return rects
+
+    def _video_input_args(self, input_format, framerate, capture_rects):
+        args = []
+        for rect in capture_rects:
+            args.extend(["-f", input_format, "-framerate", str(framerate)])
+            args.extend(self._build_capture_args(rect))
+            args.extend(["-i", "desktop"])
+        return args
+
+    def _filter_args(self, scene_plan, capture_rects, has_mic, audio_index):
+        filter_complex = self._video_filter_complex(scene_plan, capture_rects)
+        if not filter_complex:
+            return self._audio_filter_args(scene_plan, has_mic, audio_index)
+
+        args = ["-filter_complex", filter_complex, "-map", "[vout]"]
+        args.extend(self._mapped_audio_args(scene_plan, has_mic, audio_index))
+        return args
+
+    def _audio_filter_args(self, scene_plan, has_mic, audio_index):
+        if scene_plan is None or not has_mic:
+            return []
+
+        mic_volume = self._microphone_volume(scene_plan)
+        if mic_volume is None:
+            return []
+        return ["-filter:a", f"volume={mic_volume:.2f}"]
+
+    def _mapped_audio_args(self, scene_plan, has_mic, audio_index):
+        if not has_mic:
+            return []
+        args = ["-map", f"{audio_index}:a"]
+        args.extend(self._audio_filter_args(scene_plan, has_mic, audio_index))
+        return args
+
+    @staticmethod
+    def _microphone_volume(scene_plan):
+        for channel in scene_plan.audio_channels:
+            if channel.target and not channel.muted:
+                return channel.volume
+        return None
+
+    def _video_filter_complex(self, scene_plan, capture_rects):
+        if scene_plan is None or len(capture_rects) < 2:
+            return ""
+
+        base_rect = capture_rects[0]
+        if base_rect is None:
+            return ""
+        chain = ["[0:v]setpts=PTS-STARTPTS[base0]"]
+        current = "base0"
+        overlays = self._overlay_layers(scene_plan)
+        for index, layer in enumerate(overlays, start=1):
+            overlay_name = f"ovr{index}"
+            output_name = "vout" if index == len(capture_rects) - 1 else f"base{index}"
+            chain.append(self._overlay_prepare(index, layer.opacity, overlay_name))
+            chain.append(self._overlay_link(current, overlay_name, output_name, base_rect, capture_rects[index]))
+            current = output_name
+        if current != "vout":
+            chain.append(f"[{current}]copy[vout]")
+        return ";".join(chain)
+
+    @staticmethod
+    def _overlay_layers(scene_plan):
+        return [layer for layer in scene_plan.overlays if layer.rect]
+
+    @staticmethod
+    def _overlay_prepare(index, opacity, overlay_name):
+        if opacity >= 0.999:
+            return f"[{index}:v]setpts=PTS-STARTPTS,format=rgba[{overlay_name}]"
+        return (
+            f"[{index}:v]setpts=PTS-STARTPTS,format=rgba,"
+            f"colorchannelmixer=aa={opacity:.2f}[{overlay_name}]"
+        )
+
+    @staticmethod
+    def _overlay_link(base_name, overlay_name, output_name, base_rect, overlay_rect):
+        base_left = base_rect[0]
+        base_top = base_rect[1]
+        overlay_left = overlay_rect[0]
+        overlay_top = overlay_rect[1]
+        x_pos = overlay_left - base_left
+        y_pos = overlay_top - base_top
+        return f"[{base_name}][{overlay_name}]overlay={x_pos}:{y_pos}:format=auto[{output_name}]"
+
+    @staticmethod
+    def _build_capture_args(rect):
+        if not rect:
+            return []
+        x1, y1, x2, y2 = rect
+        return [
+            "-offset_x", str(x1),
+            "-offset_y", str(y1),
+            "-video_size", f"{x2 - x1}x{y2 - y1}",
+        ]
+
+    @staticmethod
+    def _video_args(encoder, quality):
+        if encoder == "libx264":
+            return ["-preset", quality["preset"], "-tune", "zerolatency", "-crf", str(quality["crf"])]
+        if encoder == "h264_nvenc":
+            return ["-preset", "p4", "-tune", "ll", "-rc", "vbr", "-cq", str(quality["crf"] + 5), "-b:v", "0"]
+        if encoder == "h264_qsv":
+            return ["-preset", "faster", "-global_quality", str(quality["crf"] + 5)]
+
+        amf_qp = max(12, quality["crf"])
+        return ["-usage", "lowlatency", "-rc", "cqp", "-qp_i", str(amf_qp), "-qp_p", str(amf_qp), "-quality", "speed"]
+
+    def _launch_ffmpeg(self, cmd, output_path, encoder, framerate, safe_framerate, quality_preset, capture_width):
+        self._open_log_file(output_path, encoder, framerate, safe_framerate, quality_preset, capture_width, cmd)
         try:
             self.process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW,
             )
         except Exception as e:
-            print(f"Failed to start FFmpeg: {e}")
+            print(f"Failed to start FFmpeg with {encoder}: {e}")
             self._close_log_file()
             return False
-        
-        # Start progress monitor
+
+        if self.process.poll() not in (None, 0):
+            self.process = None
+            self._close_log_file()
+            return False
+
+        self.current_encoder = encoder
         self._start_output_monitor()
-        
         return True
+
+    def _open_log_file(self, output_path, encoder, framerate, safe_framerate, quality_preset, capture_width, cmd):
+        log_path = output_path + ".log"
+        try:
+            self._log_file = open(log_path, "w", encoding="utf-8")
+            self._log_file.write(f"Encoder: {encoder}\n")
+            self._log_file.write(f"FPS: {framerate}\n")
+            self._log_file.write(f"Safe FPS: {safe_framerate}\n")
+            self._log_file.write(f"Capture Width: {capture_width}\n")
+            self._log_file.write(f"Quality: {quality_preset}\n")
+            self._log_file.write(f"Command: {' '.join(cmd)}\n\n")
+            self._log_file.flush()
+        except Exception as e:
+            print(f"Failed to create log file: {e}")
+            self._log_file = None
 
     def _start_output_monitor(self):
         """Start thread to monitor FFmpeg output and parse progress"""
@@ -510,18 +664,17 @@ class FFmpegHandler:
         if not self._is_recording or not self._is_paused:
             return False
         
-        # Track pause duration
-        if self._pause_start:
-            self._total_pause_duration += time.time() - self._pause_start
-            self._pause_start = None
-        
         self._is_paused = False
         
         # Start new segment
         success = self._start_segment()
         if success:
+            if self._pause_start:
+                self._total_pause_duration += time.time() - self._pause_start
+                self._pause_start = None
             print(f"Recording resumed (new segment {self._segment_index - 1})")
         else:
+            self._is_paused = True
             print("Failed to resume recording")
             if self._on_error:
                 self._on_error("Failed to resume recording")
@@ -531,11 +684,12 @@ class FFmpegHandler:
     def toggle_pause(self) -> bool:
         """Toggle pause state, returns new pause state"""
         if self._is_paused:
-            self.resume()
-            return False
-        else:
-            self.pause()
+            return not self.resume()
+
+        if self.pause():
             return True
+
+        return False
 
     def is_paused(self) -> bool:
         """Check if recording is paused"""
@@ -588,8 +742,12 @@ class FFmpegHandler:
         self._is_recording = False
         self._is_paused = False
         self.current_output = None
+        self.current_encoder = None
         self.start_timestamp = None
+        self._pause_start = None
         self._total_pause_duration = 0.0
+        self._recording_params = None
+        self._final_output = None
         self._segments = []
         self._segment_index = 0
         self._last_progress = RecordingProgress()
