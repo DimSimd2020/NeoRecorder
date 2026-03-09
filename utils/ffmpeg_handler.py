@@ -1,8 +1,9 @@
 """
-FFmpeg Handler v1.3.0 for NeoRecorder.
+FFmpeg Handler v1.4.0 for NeoRecorder.
 - Segment-based pause (no NtSuspend risks)
 - Real-time progress monitoring (fps, bitrate, frame count)
 - Robust error handling and resource cleanup
+- Safe mode fallback for unstable hardware encoders
 """
 
 import subprocess
@@ -12,10 +13,16 @@ import threading
 import queue
 import re
 import tempfile
+import platform
 from typing import Optional, Dict, Callable, List
 from dataclasses import dataclass
 from config import FFMPEG_PATH, QUALITY_PRESETS, USE_HARDWARE_ENCODER
 from utils.logger import get_logger, log_ffmpeg_output, log_error, log_debug
+
+if platform.system() == "Windows":
+    CREATION_FLAGS = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+else:
+    CREATION_FLAGS = 0
 
 ENCODER_PRIORITY = ("h264_nvenc", "h264_qsv", "h264_amf")
 ENCODER_LIMITS = {
@@ -73,6 +80,7 @@ class FFmpegHandler:
         
         # Callbacks
         self._on_error: Optional[Callable[[str], None]] = None
+        self._on_warning: Optional[Callable[[str], None]] = None
         self._on_started: Optional[Callable[[], None]] = None
         self._on_stopped: Optional[Callable[[Dict], None]] = None
         self._on_progress: Optional[Callable[[RecordingProgress], None]] = None
@@ -81,13 +89,15 @@ class FFmpegHandler:
         self._output_queue: queue.Queue = queue.Queue()
         self._last_progress: RecordingProgress = RecordingProgress()
         self._log_file = None
+        self._safe_mode_active = False
 
-    def set_callbacks(self, on_started=None, on_stopped=None, on_error=None, on_progress=None):
+    def set_callbacks(self, on_started=None, on_stopped=None, on_error=None, on_progress=None, on_warning=None):
         """Set callback functions for async events"""
         self._on_started = on_started
         self._on_stopped = on_stopped
         self._on_error = on_error
         self._on_progress = on_progress
+        self._on_warning = on_warning
 
     def get_progress(self) -> RecordingProgress:
         """Get current recording progress"""
@@ -105,7 +115,7 @@ class FFmpegHandler:
             result = subprocess.run(
                 [FFMPEG_PATH, "-encoders", "-hide_banner"],
                 capture_output=True, text=True, timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW
+                creationflags=CREATION_FLAGS
             )
             output = result.stdout
         except Exception as e:
@@ -147,7 +157,7 @@ class FFmpegHandler:
                 cmd,
                 capture_output=True,
                 timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW
+                creationflags=CREATION_FLAGS
             )
             return result.returncode == 0
         except Exception:
@@ -155,7 +165,9 @@ class FFmpegHandler:
 
     def get_best_encoder(self) -> str:
         """Get the best available encoder (prefer hardware)"""
-        return self._encoder_candidates(capture_width=0, framerate=60)[0]
+        if self._safe_mode_active or not USE_HARDWARE_ENCODER:
+            return "libx264"
+        return self._encoder_candidates(0, 60)[0]
 
     def start_recording(self, output_path: str, rect=None, mic=None, system=False,
                        scene_plan=None,
@@ -174,6 +186,7 @@ class FFmpegHandler:
         self._segments = []
         self._segment_index = 0
         self._final_output = output_path
+        self._safe_mode_active = False
         
         # Create temp directory for segments
         self._temp_dir = tempfile.mkdtemp(prefix="neorecorder_")
@@ -234,7 +247,8 @@ class FFmpegHandler:
             params["system"],
             params.get("scene_plan"),
             params["framerate"],
-            params["quality_preset"]
+            params["quality_preset"],
+            False,
         )
         
         if not success:
@@ -259,7 +273,7 @@ class FFmpegHandler:
                 text=True, 
                 encoding='utf-8', 
                 errors='ignore',
-                creationflags=subprocess.CREATE_NO_WINDOW
+                creationflags=CREATION_FLAGS
             )
             # Look for: Video: bmp, bgra, 5120x1440, ...
             match = re.search(r'Video:.*,\s+(\d+)x(\d+)[,\s]', result.stderr)
@@ -269,13 +283,29 @@ class FFmpegHandler:
             print(f"Error checking GDI resolution: {e}")
         return 0, 0
     
-    def _try_ffmpeg(self, output_path: str, input_format: str, rect, mic,
-                   system, scene_plan, framerate, quality_preset) -> bool:
+    def _try_ffmpeg(
+        self,
+        output_path: str,
+        input_format: str,
+        rect,
+        mic,
+        system,
+        scene_plan,
+        framerate,
+        quality_preset,
+        probe_resolution=True,
+    ) -> bool:
         """Build and execute FFmpeg command with proper resource management"""
         quality = QUALITY_PRESETS.get(quality_preset, QUALITY_PRESETS["balanced"])
-        decision = self._build_encoder_decision(input_format, rect, framerate)
+        decision = self._build_encoder_decision(input_format, rect, framerate, probe_resolution)
+        tried_hardware = False
 
-        for encoder in decision.candidates:
+        for encoder in self._encoder_chain(decision):
+            safe_mode = encoder == "libx264" and tried_hardware
+            if safe_mode and not self._safe_mode_active:
+                self._safe_mode_active = True
+                if self._on_warning:
+                    self._on_warning("Switching to Safe Mode (Software Encoding) due to hardware error.")
             cmd = self._build_ffmpeg_command(
                 output_path,
                 input_format,
@@ -285,6 +315,7 @@ class FFmpegHandler:
                 decision.safe_framerate,
                 quality,
                 encoder,
+                safe_mode=safe_mode,
             )
             if self._launch_ffmpeg(
                 cmd,
@@ -296,16 +327,22 @@ class FFmpegHandler:
                 decision.capture_width,
             ):
                 return True
+            tried_hardware = tried_hardware or encoder != "libx264"
 
         self.current_encoder = None
         return False
 
-    def _build_encoder_decision(self, input_format, rect, framerate) -> EncoderDecision:
+    def _encoder_chain(self, decision: EncoderDecision) -> List[str]:
+        best = self.get_best_encoder()
+        if best != "libx264" and self._is_encoder_compatible(best, decision.capture_width, decision.safe_framerate):
+            return [best, "libx264"]
+        return ["libx264"]
+
+    def _build_encoder_decision(self, input_format, rect, framerate, probe_resolution=True) -> EncoderDecision:
         normalized_rect = self._normalize_rect(rect)
-        capture_width = self._resolve_capture_width(normalized_rect)
+        capture_width = self._resolve_capture_width(normalized_rect, probe_resolution)
         safe_framerate = self._resolve_safe_framerate(input_format, capture_width, framerate)
-        candidates = tuple(self._encoder_candidates(capture_width, safe_framerate))
-        return EncoderDecision(normalized_rect, capture_width, safe_framerate, candidates)
+        return EncoderDecision(normalized_rect, capture_width, safe_framerate, tuple())
 
     def _normalize_rect(self, rect):
         if not rect:
@@ -319,12 +356,13 @@ class FFmpegHandler:
         height = height if height % 2 == 0 else height - 1
         return (left, top, left + width, top + height)
 
-    def _resolve_capture_width(self, rect) -> int:
+    def _resolve_capture_width(self, rect, probe_resolution=True) -> int:
         if rect:
             return rect[2] - rect[0]
-        width, _height = self._get_gdigrab_resolution()
-        if width > 0:
-            return width
+        if probe_resolution:
+            width, _height = self._get_gdigrab_resolution()
+            if width > 0:
+                return width
         return self._system_width()
 
     @staticmethod
@@ -373,7 +411,18 @@ class FFmpegHandler:
             return False
         return framerate <= max_fps
 
-    def _build_ffmpeg_command(self, output_path, input_format, rect, mic, scene_plan, framerate, quality, encoder):
+    def _build_ffmpeg_command(
+        self,
+        output_path,
+        input_format,
+        rect,
+        mic,
+        scene_plan,
+        framerate,
+        quality,
+        encoder,
+        safe_mode=False,
+    ):
         capture_rects = self._capture_rects(rect, scene_plan)
         cmd = [FFMPEG_PATH, "-y"]
         cmd.extend(self._video_input_args(input_format, framerate, capture_rects))
@@ -382,7 +431,8 @@ class FFmpegHandler:
             cmd.extend(["-f", "dshow", "-i", f"audio={mic}"])
         cmd.extend(self._filter_args(scene_plan, capture_rects, mic is not None, audio_index))
         cmd.extend(["-c:v", encoder])
-        cmd.extend(self._video_args(encoder, quality))
+        selected_quality = QUALITY_PRESETS["ultrafast"] if safe_mode and encoder == "libx264" else quality
+        cmd.extend(self._video_args(encoder, selected_quality))
         cmd.extend(["-pix_fmt", "yuv420p", "-vsync", "cfr", output_path])
         return cmd
 
@@ -509,7 +559,7 @@ class FFmpegHandler:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW,
+                creationflags=CREATION_FLAGS,
             )
         except Exception as e:
             print(f"Failed to start FFmpeg with {encoder}: {e}")
@@ -797,7 +847,7 @@ class FFmpegHandler:
             result = subprocess.run(
                 cmd,
                 capture_output=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=CREATION_FLAGS,
                 timeout=300
             )
             
@@ -872,7 +922,7 @@ class FFmpegHandler:
                 capture_output=True, 
                 encoding='utf-8', 
                 errors='ignore',
-                creationflags=subprocess.CREATE_NO_WINDOW
+                creationflags=CREATION_FLAGS
             )
             
             output = result.stderr

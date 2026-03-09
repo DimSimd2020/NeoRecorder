@@ -285,6 +285,11 @@ def show_error_notification(title: str, message: str):
     show_notification(title, message, NotificationKind.ERROR, footer="Open the app for details")
 
 
+def show_warning_notification(title: str, message: str):
+    """Show warning notification."""
+    show_notification(title, message, NotificationKind.INFO, footer="Check recording settings")
+
+
 def _normalize_line(value: str, fallback: str) -> str:
     compact = " ".join(str(value or "").split())
     return compact or fallback
