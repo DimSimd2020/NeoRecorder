@@ -6,6 +6,7 @@ Reusable component for selecting screen regions with dimming and visual feedback
 import tkinter as tk
 from typing import Callable, Optional, Tuple
 from PIL import ImageGrab, ImageTk, ImageEnhance
+from utils.display_manager import get_display_manager
 
 
 class RegionSelector:
@@ -50,16 +51,20 @@ class RegionSelector:
         self.on_select = on_select
         self.on_cancel = on_cancel
         self._closed = False
+        self._display_manager = get_display_manager()
         
-        # Get screen dimensions
-        self.screen_width = master.winfo_screenwidth()
-        self.screen_height = master.winfo_screenheight()
+        # Get virtual desktop dimensions
+        bounds = self._display_manager.get_virtual_bounds()
+        self.screen_left = bounds.left
+        self.screen_top = bounds.top
+        self.screen_width = bounds.width
+        self.screen_height = bounds.height
         
         # Take screenshot for background
         self.screenshot = None
         self.bg_image = None
         try:
-            self.screenshot = ImageGrab.grab()
+            self.screenshot = self._grab_background()
             if dim_screen:
                 enhancer = ImageEnhance.Brightness(self.screenshot)
                 self.screenshot = enhancer.enhance(0.4)  # 40% brightness
@@ -69,7 +74,7 @@ class RegionSelector:
         # Create window
         self.window = tk.Toplevel(master)
         self.window.overrideredirect(True)
-        self.window.geometry(f"{self.screen_width}x{self.screen_height}+0+0")
+        self.window.geometry(bounds.to_geometry())
         self.window.attributes("-topmost", True)
         self.window.configure(bg="black", cursor="cross")
         
@@ -128,7 +133,14 @@ class RegionSelector:
         
         self.window.focus_force()
         self.window.lift()
-    
+
+    @staticmethod
+    def _grab_background():
+        try:
+            return ImageGrab.grab(all_screens=True)
+        except TypeError:
+            return ImageGrab.grab()
+
     def _on_press(self, event):
         """Mouse pressed - start selection"""
         self.start_x = event.x
@@ -197,7 +209,7 @@ class RegionSelector:
         # Minimum size check (10x10 pixels)
         if (x2 - x1) > 10 and (y2 - y1) > 10:
             self._closed = True
-            rect = (x1, y1, x2, y2)
+            rect = self._to_absolute_rect(x1, y1, x2, y2)
             self._cleanup()
             self.on_select(rect)
         else:
@@ -205,6 +217,14 @@ class RegionSelector:
             self.canvas.delete("selection")
             self.start_x = None
             self.start_y = None
+
+    def _to_absolute_rect(self, x1, y1, x2, y2):
+        return (
+            x1 + self.screen_left,
+            y1 + self.screen_top,
+            x2 + self.screen_left,
+            y2 + self.screen_top,
+        )
     
     def _cancel(self):
         """Cancel selection"""

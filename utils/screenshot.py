@@ -12,6 +12,7 @@ from PIL import Image
 import mss
 import mss.tools
 from config import SCREENSHOTS_DIR, SCREENSHOT_FORMAT
+from utils.display_manager import get_display_manager
 from utils.logger import get_logger, log_debug
 
 
@@ -24,6 +25,7 @@ class ScreenshotCapture:
     def __init__(self):
         self._sct = None
         self._output_dir = SCREENSHOTS_DIR
+        self._display_manager = get_display_manager()
         self._logger = get_logger()
         self._ensure_output_dir()
     
@@ -37,20 +39,22 @@ class ScreenshotCapture:
             self._sct = mss.mss()
         return self._sct
     
-    def capture_fullscreen(self) -> Optional[str]:
+    def capture_fullscreen(self, monitor_index: int = 1) -> Optional[str]:
         """
-        Capture entire primary screen.
+        Capture an entire display.
         Returns path to saved file or None on error.
         """
+        return self.capture_display(monitor_index)
+
+    def capture_display(self, monitor_index: int = 1) -> Optional[str]:
+        """Capture a specific display by monitor index."""
         try:
+            monitor = self._resolve_monitor(monitor_index)
             sct = self._get_mss()
-            monitor = sct.monitors[1]  # Primary monitor
-            
             screenshot = sct.grab(monitor)
             return self._save_screenshot(screenshot)
-            
         except Exception as e:
-            self._logger.error(f"Fullscreen capture failed: {e}")
+            self._logger.error(f"Display capture failed: {e}")
             return None
     
     def capture_region(self, rect: Tuple[int, int, int, int]) -> Optional[str]:
@@ -85,7 +89,11 @@ class ScreenshotCapture:
             self._logger.error(f"Region capture failed: {e}")
             return None
     
-    def capture_to_clipboard(self, rect: Optional[Tuple[int, int, int, int]] = None) -> bool:
+    def capture_to_clipboard(
+        self,
+        rect: Optional[Tuple[int, int, int, int]] = None,
+        monitor_index: int = 1,
+    ) -> bool:
         """
         Capture and copy to clipboard.
         
@@ -107,7 +115,7 @@ class ScreenshotCapture:
                     "height": abs(y2 - y1)
                 }
             else:
-                monitor = sct.monitors[1]
+                monitor = self._resolve_monitor(monitor_index)
             
             screenshot = sct.grab(monitor)
             
@@ -145,6 +153,10 @@ class ScreenshotCapture:
         log_debug(f"Screenshot saved: {filepath}")
         
         return filepath
+
+    def _resolve_monitor(self, monitor_index: int) -> dict[str, int]:
+        monitor = self._display_manager.get_monitor(monitor_index)
+        return monitor.bounds.to_mss_box()
     
     def _copy_image_to_clipboard(self, image: Image.Image):
         """Copy PIL Image to Windows clipboard"""

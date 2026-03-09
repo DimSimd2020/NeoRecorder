@@ -7,25 +7,23 @@ import logging
 import os
 import sys
 from datetime import datetime
-from typing import Optional
+from typing import Dict
 
-# Global logger instance
-_logger: Optional[logging.Logger] = None
+# Logger cache by name
+_loggers: Dict[str, logging.Logger] = {}
 
 
 def get_logger(name: str = "NeoRecorder") -> logging.Logger:
     """Get or create the application logger"""
-    global _logger
-    
-    if _logger is not None:
-        return _logger
-    
-    _logger = logging.getLogger(name)
-    _logger.setLevel(logging.DEBUG)
-    
-    # Prevent duplicate handlers
-    if _logger.handlers:
-        return _logger
+    if name in _loggers:
+        return _loggers[name]
+
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)
+
+    if logger.handlers:
+        _loggers[name] = logger
+        return logger
     
     # Create logs directory
     log_dir = os.path.join(
@@ -48,7 +46,7 @@ def get_logger(name: str = "NeoRecorder") -> logging.Logger:
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     file_handler.setFormatter(file_format)
-    _logger.addHandler(file_handler)
+    logger.addHandler(file_handler)
     
     # Console handler (INFO level, only in dev mode)
     if not getattr(sys, 'frozen', False):
@@ -58,11 +56,11 @@ def get_logger(name: str = "NeoRecorder") -> logging.Logger:
             '%(levelname)s: %(message)s'
         )
         console_handler.setFormatter(console_format)
-        _logger.addHandler(console_handler)
+        logger.addHandler(console_handler)
     
-    _logger.info(f"Logger initialized. Log file: {log_path}")
-    
-    return _logger
+    logger.info(f"Logger initialized. Log file: {log_path}")
+    _loggers[name] = logger
+    return logger
 
 
 def log_recording_start(output_path: str, fps: int, quality: str, encoder: str):

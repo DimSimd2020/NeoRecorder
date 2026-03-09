@@ -9,15 +9,38 @@ from config import *
 from core.audio_manager import AudioManager
 from core.window_finder import WindowFinder
 from core.recorder import ScreenRecorder
-from gui.widgets import VUMeter
+from core.studio.planner import SceneRecordingPlanner
+from core.studio.session import StudioSessionService, TransitionKind
+from core.studio.service import StudioProjectService
+from gui.studio_presenter import (
+    format_bounds,
+    format_preview_caption,
+    format_scene_summary,
+    format_source_caption,
+    format_source_kind,
+)
+from gui.widgets import MixerStrip, ScenePreview, VUMeter
 from gui.overlay import RegionOverlay
 from gui.recording_widget import RecordingWidget
 from gui.tray import SystemTray
 from gui.quick_overlay import QuickOverlay
-from utils.notifications import show_recording_complete, show_simple_notification
+from utils.display_manager import get_display_manager
+from utils.notifications import show_error_notification, show_recording_complete, show_simple_notification
 from utils.hotkeys import get_hotkey_manager
 from utils.screenshot import get_screenshot_capture
 from utils.logger import get_logger
+
+
+STUDIO_BG = "#09131B"
+STUDIO_SURFACE = "#101B27"
+STUDIO_PANEL = "#162433"
+STUDIO_PANEL_ALT = "#1B2D3F"
+STUDIO_BORDER = "#274459"
+STUDIO_TEXT = "#F4FBFF"
+STUDIO_MUTED = "#86A2B6"
+STUDIO_ACCENT = "#27C1F4"
+STUDIO_WARN = "#F26D3D"
+STUDIO_GO = "#1FA971"
 
 class SettingsWindow(ctk.CTkToplevel):
     def __init__(self, parent):
@@ -25,7 +48,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.parent = parent
         self.title(parent.t("settings"))
         self.geometry("480x650")
-        self.configure(fg_color=BG_COLOR)
+        self.configure(fg_color=STUDIO_BG)
         self.attributes("-topmost", True)
         
         self.setup_ui()
@@ -41,7 +64,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.scroll_frame.pack(fill="both", expand=True, padx=20, pady=5)
         
         # === Language Section ===
-        lang_frame = ctk.CTkFrame(self.scroll_frame, fg_color="#333333", corner_radius=10)
+        lang_frame = ctk.CTkFrame(self.scroll_frame, fg_color=STUDIO_PANEL, corner_radius=12)
         lang_frame.pack(fill="x", pady=8)
         
         ctk.CTkLabel(lang_frame, text="Language / Язык:", 
@@ -52,7 +75,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.lang_combo.pack(pady=(0, 12), padx=15, anchor="w")
 
         # === Recording Settings ===
-        rec_frame = ctk.CTkFrame(self.scroll_frame, fg_color="#333333", corner_radius=10)
+        rec_frame = ctk.CTkFrame(self.scroll_frame, fg_color=STUDIO_PANEL, corner_radius=12)
         rec_frame.pack(fill="x", pady=8)
         
         ctk.CTkLabel(rec_frame, text="🎬 " + self.parent.t("fps") + ":", 
@@ -85,7 +108,7 @@ class SettingsWindow(ctk.CTkToplevel):
                     font=("Segoe UI", 11), text_color=SECONDARY_TEXT_COLOR).pack(pady=(0, 12), padx=15, anchor="w")
 
         # === Output Path ===
-        path_frame = ctk.CTkFrame(self.scroll_frame, fg_color="#333333", corner_radius=10)
+        path_frame = ctk.CTkFrame(self.scroll_frame, fg_color=STUDIO_PANEL, corner_radius=12)
         path_frame.pack(fill="x", pady=8)
         
         ctk.CTkLabel(path_frame, text="📁 " + self.parent.t("output_path") + ":", 
@@ -103,7 +126,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.browse_btn.pack(side="right")
 
         # === Tray Settings ===
-        tray_frame = ctk.CTkFrame(self.scroll_frame, fg_color="#333333", corner_radius=10)
+        tray_frame = ctk.CTkFrame(self.scroll_frame, fg_color=STUDIO_PANEL, corner_radius=12)
         tray_frame.pack(fill="x", pady=8)
         
         ctk.CTkLabel(tray_frame, text="🔔 Фоновый режим:", 
@@ -128,7 +151,7 @@ class SettingsWindow(ctk.CTkToplevel):
             self.start_min_switch.select()
 
         # === Hotkeys Section ===
-        hotkey_frame = ctk.CTkFrame(self.scroll_frame, fg_color="#333333", corner_radius=10)
+        hotkey_frame = ctk.CTkFrame(self.scroll_frame, fg_color=STUDIO_PANEL, corner_radius=12)
         hotkey_frame.pack(fill="x", pady=8)
         
         ctk.CTkLabel(hotkey_frame, text="⌨️ Горячие клавиши:", 
@@ -155,7 +178,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.show_hotkey_entry.pack(side="left", padx=10)
 
         # === Screenshots Path ===
-        scr_path_frame = ctk.CTkFrame(self.scroll_frame, fg_color="#333333", corner_radius=10)
+        scr_path_frame = ctk.CTkFrame(self.scroll_frame, fg_color=STUDIO_PANEL, corner_radius=12)
         scr_path_frame.pack(fill="x", pady=8)
         
         ctk.CTkLabel(scr_path_frame, text="📸 " + self.parent.t("screenshots_path") + ":", 
@@ -173,7 +196,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.browse_scr_btn.pack(side="right")
 
         # === Overlay Settings ===
-        ovr_frame = ctk.CTkFrame(self.scroll_frame, fg_color="#333333", corner_radius=10)
+        ovr_frame = ctk.CTkFrame(self.scroll_frame, fg_color=STUDIO_PANEL, corner_radius=12)
         ovr_frame.pack(fill="x", pady=8)
         
         ctk.CTkLabel(ovr_frame, text="🎨 " + self.parent.t("overlay_settings") + ":", 
@@ -198,8 +221,16 @@ class SettingsWindow(ctk.CTkToplevel):
             self.ovr_lock_switch.select()
 
         # === Save Button ===
-        save_btn = ctk.CTkButton(self, text="Сохранить", width=140, height=40, 
-                                 fg_color=ACCENT_COLOR, command=self.save_and_close)
+        save_btn = ctk.CTkButton(
+            self,
+            text="Сохранить",
+            width=140,
+            height=40,
+            fg_color=ACCENT_COLOR,
+            hover_color="#46D0FF",
+            text_color=STUDIO_TEXT,
+            command=self.save_and_close,
+        )
         save_btn.pack(pady=15)
 
     def browse_path(self):
@@ -286,8 +317,8 @@ class NeoRecorderApp(ctk.CTk):
         super().__init__()
 
         self.title(APP_NAME)
-        self.geometry("420x650")
-        self.configure(fg_color=BG_COLOR)
+        self.geometry("1480x860")
+        self.configure(fg_color=STUDIO_BG)
         
         # Set window icon
         try:
@@ -300,8 +331,8 @@ class NeoRecorderApp(ctk.CTk):
         # 1. Show Loading Screen immediately
         self.loading_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.loading_frame.place(relx=0.5, rely=0.5, anchor="center")
-        ctk.CTkLabel(self.loading_frame, text="NeoRecorder", font=("Segoe UI", 32, "bold"), text_color=NEON_BLUE).pack(pady=10)
-        ctk.CTkLabel(self.loading_frame, text="Loading...", font=("Segoe UI", 16)).pack()
+        ctk.CTkLabel(self.loading_frame, text="NeoRecorder", font=("Bahnschrift SemiCondensed", 34, "bold"), text_color=NEON_BLUE).pack(pady=10)
+        ctk.CTkLabel(self.loading_frame, text="Loading Studio Workspace...", font=("Consolas", 14), text_color=SECONDARY_TEXT_COLOR).pack()
         
         # Force window to render "Loading..." before we freeze it with initialization
         self.update()
@@ -356,7 +387,14 @@ class NeoRecorderApp(ctk.CTk):
             self.recorder.set_output_dir(saved_path)
             
         self.screenshot_capture = get_screenshot_capture()
+        self.display_manager = get_display_manager()
+        self.displays = self.display_manager.list_monitors()
         self.hotkey_manager = get_hotkey_manager()
+        self.project_service = StudioProjectService()
+        self.session_service = StudioSessionService()
+        self.recording_planner = SceneRecordingPlanner()
+        self.project = self.project_service.create_project("NeoRecorder Session")
+        self.studio_session = self.session_service.create_session(self.project)
         
         # Register recorder callbacks
         self.recorder.set_callbacks(
@@ -369,7 +407,10 @@ class NeoRecorderApp(ctk.CTk):
         self.recording_mode = self._settings.get("last_mode", "screen")
         self.selected_rect = None
         self.selected_window_hwnd = None
+        self.selected_display_index = 1
         self.active_windows = []
+        self.selected_scene_id = self.studio_session.preview_scene_id
+        self.selected_source_id = None
         self.widget = None
         self.quick_overlay = None
         self.tray = None
@@ -390,11 +431,11 @@ class NeoRecorderApp(ctk.CTk):
             self.widget = None
         
         self.deiconify()
-        self.rec_btn.configure(image=self.icon_rec, fg_color="transparent")
+        self.rec_btn.configure(image=self.icon_rec, fg_color="#203345", hover_color="#28465E")
         self.timer_label.configure(text="00:00:00")
+        self._refresh_dashboard()
         
-        from utils.notifications import show_simple_notification
-        show_simple_notification("Recording Error", str(error))
+        show_error_notification("Recording Error", str(error))
         
     def on_recording_complete_event(self, result):
         """Handle async recording stop (e.g. from hotkey or error recovery)"""
@@ -456,96 +497,593 @@ class NeoRecorderApp(ctk.CTk):
         SettingsWindow(self)
 
     def setup_ui(self):
-        # Load Icons
-        self.icon_rec = ctk.CTkImage(Image.open(os.path.join(ICONS_DIR, "rec.png")), size=(80, 80))
-        self.icon_stop = ctk.CTkImage(Image.open(os.path.join(ICONS_DIR, "stop.png")), size=(80, 80))
-        self.icon_folder = ctk.CTkImage(Image.open(os.path.join(ICONS_DIR, "folder.png")), size=(30, 30))
-        self.icon_settings = ctk.CTkImage(Image.open(os.path.join(ICONS_DIR, "settings.png")), size=(30, 30))
-
-        # Header
-        self.header = ctk.CTkLabel(self, text=self.t("app_title"), 
-                                   font=("Segoe UI", 28, "bold"), text_color=NEON_BLUE)
-        self.header.pack(pady=20)
-
-        # Mode Selection
-        self.mode_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.mode_frame.pack(pady=10)
-        
-        self.btn_screen = ctk.CTkButton(self.mode_frame, text=self.t("mode_screen"), 
-                                        width=100, command=lambda: self.set_mode("screen"))
-        self.btn_screen.grid(row=0, column=0, padx=5)
-        
-        self.btn_region = ctk.CTkButton(self.mode_frame, text=self.t("mode_region"), 
-                                        width=100, command=self.select_region)
-        self.btn_region.grid(row=0, column=1, padx=5)
-        
-        self.btn_window = ctk.CTkButton(self.mode_frame, text=self.t("mode_window"), 
-                                        width=100, command=self.show_window_selector)
-        self.btn_window.grid(row=0, column=2, padx=5)
-
-        # Window Selection Dropdown (hidden by default)
-        self.window_combo = ctk.CTkComboBox(self, width=380, command=self.on_window_selected)
-        self.window_combo.pack(pady=5)
-        self.window_combo.pack_forget()
-
-        # FPS/Quality indicator
-        self.status_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.status_frame.pack(pady=5)
-        
-        encoder = self.recorder.get_best_encoder()
-        encoder_short = "NVENC" if "nvenc" in encoder else \
-                       "QSV" if "qsv" in encoder else \
-                       "AMF" if "amf" in encoder else "CPU"
-        
-        self.fps_label = ctk.CTkLabel(self.status_frame, 
-                                      text=f"{self.current_fps} FPS | {encoder_short}", 
-                                      font=("Segoe UI", 11), text_color=SECONDARY_TEXT_COLOR)
-        self.fps_label.pack()
-
-        # Audio Section
-        self.audio_frame = ctk.CTkFrame(self, fg_color="#333333", corner_radius=10)
-        self.audio_frame.pack(pady=20, padx=20, fill="x")
-        
-        self.mic_switch = ctk.CTkSwitch(self.audio_frame, text=self.t("mic_source"), 
-                                        progress_color=NEON_BLUE)
-        self.mic_switch.pack(pady=10, padx=10, anchor="w")
-        
-        self.device_names = []
-        self.device_combo = ctk.CTkComboBox(self.audio_frame, values=[self.t("loading")], width=340)
-        self.device_combo.pack(pady=5, padx=10)
-        self.device_combo.set(self.t("loading"))
-
-        # Defer audio LISTING to thread (it is safe to do in background as it just enumerates)
+        self._load_icons()
+        self._build_studio_shell()
+        self._bootstrap_dashboard_state()
         threading.Thread(target=self._load_audio_devices_thread, daemon=True).start()
-        
-        self.vu_meter = VUMeter(self.audio_frame, width=360, height=8)
-        self.vu_meter.pack(pady=10, padx=10)
 
-        self.sys_audio_switch = ctk.CTkSwitch(self.audio_frame, text=self.t("system_source"), 
-                                              progress_color=NEON_BLUE)
-        self.sys_audio_switch.pack(pady=10, padx=10, anchor="w")
+    def _load_icons(self):
+        self.icon_rec = ctk.CTkImage(Image.open(os.path.join(ICONS_DIR, "rec.png")), size=(72, 72))
+        self.icon_stop = ctk.CTkImage(Image.open(os.path.join(ICONS_DIR, "stop.png")), size=(72, 72))
+        self.icon_folder = ctk.CTkImage(Image.open(os.path.join(ICONS_DIR, "folder.png")), size=(22, 22))
+        self.icon_settings = ctk.CTkImage(Image.open(os.path.join(ICONS_DIR, "settings.png")), size=(22, 22))
 
-        # Record Button
-        self.rec_btn = ctk.CTkButton(self, text="", image=self.icon_rec,
-                                     fg_color="transparent", hover_color="#333333",
-                                     width=120, height=120, corner_radius=60,
-                                     command=self.toggle_record)
-        self.rec_btn.pack(pady=30)
+    def _build_studio_shell(self):
+        self.configure(fg_color=STUDIO_BG)
+        self.shell = ctk.CTkFrame(self, fg_color=STUDIO_BG)
+        self.shell.pack(fill="both", expand=True, padx=18, pady=18)
+        self._build_header_bar()
+        self._build_workspace()
+        self._build_footer_bar()
 
-        # Bottom Buttons
-        self.bottom_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.bottom_frame.pack(fill="x", side="bottom", pady=10)
-        
-        self.btn_folder = ctk.CTkButton(self.bottom_frame, text="", image=self.icon_folder, 
-                                        width=40, command=self.open_folder, fg_color="transparent")
-        self.btn_folder.pack(side="left", padx=20)
-        
-        self.timer_label = ctk.CTkLabel(self.bottom_frame, text="00:00:00", font=("Consolas", 18))
-        self.timer_label.pack(side="left", expand=True)
-        
-        self.btn_settings = ctk.CTkButton(self.bottom_frame, text="", image=self.icon_settings, 
-                                          width=40, fg_color="transparent", command=self.open_settings)
-        self.btn_settings.pack(side="right", padx=20)
+    def _build_header_bar(self):
+        self.header_bar = ctk.CTkFrame(self.shell, fg_color=STUDIO_SURFACE, corner_radius=24)
+        self.header_bar.pack(fill="x", pady=(0, 16))
+
+        identity = ctk.CTkFrame(self.header_bar, fg_color="transparent")
+        identity.pack(side="left", padx=20, pady=18)
+        ctk.CTkLabel(
+            identity,
+            text="NeoRecorder Studio",
+            font=("Bahnschrift SemiCondensed", 30, "bold"),
+            text_color=STUDIO_TEXT,
+        ).pack(anchor="w")
+        self.header_subtitle = ctk.CTkLabel(
+            identity,
+            text="Scene deck, live preview and capture mixer",
+            font=("Consolas", 11),
+            text_color=STUDIO_MUTED,
+        )
+        self.header_subtitle.pack(anchor="w", pady=(2, 0))
+
+        status_wrap = ctk.CTkFrame(self.header_bar, fg_color="transparent")
+        status_wrap.pack(side="left", padx=12)
+        self.session_status_label = self._create_pill(status_wrap, "READY", STUDIO_GO)
+        self.session_scene_label = self._create_pill(status_wrap, "SCENE 01", "#37506A")
+
+        controls = ctk.CTkFrame(self.header_bar, fg_color="transparent")
+        controls.pack(side="right", padx=20, pady=14)
+        self.timer_label = ctk.CTkLabel(
+            controls,
+            text="00:00:00",
+            font=("Consolas", 22, "bold"),
+            text_color=STUDIO_TEXT,
+            width=128,
+        )
+        self.timer_label.pack(side="left", padx=(0, 14))
+        self.btn_folder = self._create_icon_button(controls, self.icon_folder, self.open_folder)
+        self.btn_folder.pack(side="left", padx=6)
+        self.btn_settings = self._create_icon_button(controls, self.icon_settings, self.open_settings)
+        self.btn_settings.pack(side="left", padx=6)
+        self.rec_btn = ctk.CTkButton(
+            controls,
+            text="",
+            image=self.icon_rec,
+            width=86,
+            height=86,
+            corner_radius=43,
+            fg_color="#203345",
+            hover_color="#28465E",
+            command=self.toggle_record,
+        )
+        self.rec_btn.pack(side="left", padx=(10, 0))
+
+    def _build_workspace(self):
+        self.workspace = ctk.CTkFrame(self.shell, fg_color="transparent")
+        self.workspace.pack(fill="both", expand=True)
+        self.workspace.grid_columnconfigure(1, weight=1)
+        self.workspace.grid_rowconfigure(0, weight=1)
+
+        self._build_left_column()
+        self._build_center_column()
+        self._build_right_column()
+
+    def _build_left_column(self):
+        self.left_column = ctk.CTkFrame(self.workspace, fg_color="transparent", width=300)
+        self.left_column.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        self._build_scene_panel()
+        self._build_source_panel()
+
+    def _build_center_column(self):
+        self.center_column = ctk.CTkFrame(self.workspace, fg_color="transparent")
+        self.center_column.grid(row=0, column=1, sticky="nsew")
+        self.center_column.grid_rowconfigure(0, weight=1)
+        self.center_column.grid_columnconfigure(0, weight=1)
+        self._build_preview_panel()
+        self._build_transport_panel()
+
+    def _build_right_column(self):
+        self.right_column = ctk.CTkFrame(self.workspace, fg_color="transparent", width=340)
+        self.right_column.grid(row=0, column=2, sticky="nsew", padx=(12, 0))
+        self._build_audio_panel()
+        self._build_inspector_panel()
+
+    def _build_scene_panel(self):
+        self.scene_panel = ctk.CTkFrame(self.left_column, fg_color=STUDIO_PANEL, corner_radius=22)
+        self.scene_panel.pack(fill="x", pady=(0, 12))
+        self._create_panel_title(self.scene_panel, "SCENES", self._add_scene)
+        self.scene_list = ctk.CTkScrollableFrame(self.scene_panel, fg_color="transparent", height=240)
+        self.scene_list.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+    def _build_source_panel(self):
+        self.source_panel = ctk.CTkFrame(self.left_column, fg_color=STUDIO_PANEL, corner_radius=22)
+        self.source_panel.pack(fill="both", expand=True)
+        self._create_panel_title(self.source_panel, "SOURCES", None)
+        source_tools = ctk.CTkFrame(self.source_panel, fg_color="transparent")
+        source_tools.pack(fill="x", padx=12, pady=(0, 8))
+        self._create_mode_button(source_tools, self.t("mode_screen"), lambda: self.set_mode("screen")).pack(
+            side="left", padx=(0, 6)
+        )
+        self._create_mode_button(source_tools, self.t("mode_region"), self.select_region).pack(side="left", padx=6)
+        self._create_mode_button(source_tools, self.t("mode_window"), self.show_window_selector).pack(side="left", padx=6)
+        self.source_list = ctk.CTkScrollableFrame(self.source_panel, fg_color="transparent")
+        self.source_list.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+    def _build_preview_panel(self):
+        self.preview_panel = ctk.CTkFrame(self.center_column, fg_color=STUDIO_SURFACE, corner_radius=24)
+        self.preview_panel.grid(row=0, column=0, sticky="nsew")
+        preview_header = ctk.CTkFrame(self.preview_panel, fg_color="transparent")
+        preview_header.pack(fill="x", padx=18, pady=(16, 8))
+        ctk.CTkLabel(
+            preview_header,
+            text="STUDIO MODE",
+            font=("Bahnschrift", 18, "bold"),
+            text_color=STUDIO_TEXT,
+        ).pack(side="left")
+        self.preview_caption_label = ctk.CTkLabel(
+            preview_header,
+            text="0 layers",
+            font=("Consolas", 11),
+            text_color=STUDIO_MUTED,
+        )
+        self.preview_caption_label.pack(side="right")
+
+        stage = ctk.CTkFrame(self.preview_panel, fg_color="transparent")
+        stage.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        stage.grid_columnconfigure(0, weight=1)
+        stage.grid_columnconfigure(1, weight=1)
+
+        preview_frame = ctk.CTkFrame(stage, fg_color=STUDIO_PANEL_ALT, corner_radius=20)
+        preview_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        ctk.CTkLabel(preview_frame, text="PREVIEW", font=("Bahnschrift", 15, "bold"), text_color=STUDIO_TEXT).pack(anchor="w", padx=14, pady=(12, 6))
+        self.preview_scene_label = ctk.CTkLabel(preview_frame, text="", font=("Consolas", 11), text_color=STUDIO_MUTED)
+        self.preview_scene_label.pack(anchor="w", padx=14, pady=(0, 6))
+        self.preview_widget = ScenePreview(preview_frame, width=320, height=250)
+        self.preview_widget.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        program_frame = ctk.CTkFrame(stage, fg_color=STUDIO_PANEL_ALT, corner_radius=20)
+        program_frame.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        ctk.CTkLabel(program_frame, text="PROGRAM", font=("Bahnschrift", 15, "bold"), text_color=STUDIO_TEXT).pack(anchor="w", padx=14, pady=(12, 6))
+        self.program_scene_label = ctk.CTkLabel(program_frame, text="", font=("Consolas", 11), text_color=STUDIO_MUTED)
+        self.program_scene_label.pack(anchor="w", padx=14, pady=(0, 6))
+        self.program_widget = ScenePreview(program_frame, width=320, height=250)
+        self.program_widget.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+    def _build_transport_panel(self):
+        self.transport_panel = ctk.CTkFrame(self.center_column, fg_color=STUDIO_PANEL_ALT, corner_radius=22)
+        self.transport_panel.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+
+        mode_row = ctk.CTkFrame(self.transport_panel, fg_color="transparent")
+        mode_row.pack(fill="x", padx=16, pady=(16, 10))
+        self.btn_screen = self._create_mode_button(mode_row, self.t("mode_screen"), lambda: self.set_mode("screen"))
+        self.btn_screen.pack(side="left", padx=(0, 8))
+        self.btn_region = self._create_mode_button(mode_row, self.t("mode_region"), self.select_region)
+        self.btn_region.pack(side="left", padx=8)
+        self.btn_window = self._create_mode_button(mode_row, self.t("mode_window"), self.show_window_selector)
+        self.btn_window.pack(side="left", padx=8)
+
+        picker_row = ctk.CTkFrame(self.transport_panel, fg_color="transparent")
+        picker_row.pack(fill="x", padx=16, pady=(0, 16))
+        self.display_combo = ctk.CTkComboBox(
+            picker_row,
+            values=["Display 1"],
+            width=280,
+            command=self._on_display_selected,
+        )
+        self.display_combo.pack(side="left", padx=(0, 12))
+        self.window_combo = ctk.CTkComboBox(
+            picker_row,
+            values=[self.t("select_window")],
+            width=260,
+            command=self.on_window_selected,
+        )
+        self.window_combo.pack(side="left")
+        self.window_combo.set(self.t("select_window"))
+        self.preview_mode_label = ctk.CTkLabel(
+            picker_row,
+            text="",
+            font=("Consolas", 11),
+            text_color=STUDIO_MUTED,
+        )
+        self.preview_mode_label.pack(side="right")
+
+        transition_row = ctk.CTkFrame(self.transport_panel, fg_color="transparent")
+        transition_row.pack(fill="x", padx=16, pady=(0, 16))
+        self.transition_combo = ctk.CTkComboBox(
+            transition_row,
+            values=["CUT", "FADE", "SLIDE"],
+            width=150,
+            command=self._on_transition_changed,
+        )
+        self.transition_combo.pack(side="left")
+        self.transition_combo.set("CUT")
+        self.take_button = ctk.CTkButton(
+            transition_row,
+            text="TAKE",
+            width=120,
+            height=38,
+            corner_radius=14,
+            fg_color=STUDIO_WARN,
+            hover_color="#FF8A57",
+            text_color=STUDIO_TEXT,
+            command=self._take_preview_to_program,
+        )
+        self.take_button.pack(side="left", padx=12)
+        self.take_status_label = ctk.CTkLabel(
+            transition_row,
+            text="Preview matches program",
+            font=("Consolas", 11),
+            text_color=STUDIO_MUTED,
+        )
+        self.take_status_label.pack(side="left", padx=8)
+
+    def _build_audio_panel(self):
+        self.audio_panel = ctk.CTkFrame(self.right_column, fg_color=STUDIO_PANEL, corner_radius=22)
+        self.audio_panel.pack(fill="x", pady=(0, 12))
+        self._create_panel_title(self.audio_panel, "AUDIO MIXER", None)
+
+        control_row = ctk.CTkFrame(self.audio_panel, fg_color="transparent")
+        control_row.pack(fill="x", padx=14, pady=(0, 10))
+        self.mic_switch = ctk.CTkSwitch(
+            control_row,
+            text=self.t("mic_source"),
+            progress_color=STUDIO_ACCENT,
+            command=self._on_audio_settings_changed,
+        )
+        self.mic_switch.pack(anchor="w")
+        self.sys_audio_switch = ctk.CTkSwitch(
+            control_row,
+            text=self.t("system_source"),
+            progress_color=STUDIO_ACCENT,
+            command=self._on_audio_settings_changed,
+        )
+        self.sys_audio_switch.pack(anchor="w", pady=(8, 0))
+
+        self.device_combo = ctk.CTkComboBox(
+            self.audio_panel,
+            values=[self.t("loading")],
+            command=self._on_audio_settings_changed,
+        )
+        self.device_combo.pack(fill="x", padx=14)
+        self.device_combo.set(self.t("loading"))
+        self.vu_meter = VUMeter(self.audio_panel, width=290, height=10)
+        self.vu_meter.pack(fill="x", padx=14, pady=12)
+        self.mixer_list = ctk.CTkScrollableFrame(self.audio_panel, fg_color="transparent", height=220)
+        self.mixer_list.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+    def _build_inspector_panel(self):
+        self.inspector_panel = ctk.CTkFrame(self.right_column, fg_color=STUDIO_PANEL, corner_radius=22)
+        self.inspector_panel.pack(fill="both", expand=True)
+        self._create_panel_title(self.inspector_panel, "INSPECTOR", None)
+        self.inspector_body = ctk.CTkFrame(self.inspector_panel, fg_color="transparent")
+        self.inspector_body.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+
+    def _build_footer_bar(self):
+        self.footer_bar = ctk.CTkFrame(self.shell, fg_color=STUDIO_SURFACE, corner_radius=20)
+        self.footer_bar.pack(fill="x", pady=(16, 0))
+        self.fps_label = ctk.CTkLabel(
+            self.footer_bar,
+            text="",
+            font=("Consolas", 11),
+            text_color=STUDIO_MUTED,
+        )
+        self.fps_label.pack(side="left", padx=18, pady=12)
+        self.output_label = ctk.CTkLabel(
+            self.footer_bar,
+            text="",
+            font=("Consolas", 11),
+            text_color=STUDIO_MUTED,
+        )
+        self.output_label.pack(side="right", padx=18, pady=12)
+
+    def _bootstrap_dashboard_state(self):
+        if self.recording_mode == "region" and not self.selected_rect:
+            self.recording_mode = "screen"
+        self._refresh_display_options()
+        self.transition_combo.set(self.studio_session.transition.kind.value.upper())
+        self._ensure_active_scene_video_source()
+        self._sync_controls_from_scene()
+        self._apply_mode_visuals()
+        self._refresh_dashboard()
+
+    def _ensure_active_scene_video_source(self):
+        scene = self._active_scene()
+        if scene.video_sources():
+            return
+        self._sync_active_scene_video_source()
+
+    def _sync_controls_from_scene(self):
+        scene = self._active_scene()
+        primary = scene.primary_video_source()
+        if primary is None:
+            return
+        self.recording_mode = self._mode_from_source(primary)
+        self.selected_rect = None if primary.kind.value == "display_capture" else primary.bounds.to_rect() if primary.bounds else None
+        self.selected_window_hwnd = primary.metadata.get("hwnd") if primary.kind.value == "window_capture" else None
+        self.selected_display_index = primary.display_index() or self.selected_display_index
+        self.selected_source_id = self.selected_source_id or primary.source_id
+        self._sync_display_combo()
+        self._sync_audio_controls(scene)
+
+    def _sync_audio_controls(self, scene):
+        mic_source = next((source for source in scene.audio_sources() if source.kind.value == "microphone_input"), None)
+        system_source = next((source for source in scene.audio_sources() if source.kind.value == "system_audio"), None)
+        self._set_switch_state(self.mic_switch, mic_source is not None and mic_source.enabled)
+        self._set_switch_state(self.sys_audio_switch, system_source is not None and system_source.enabled)
+        if mic_source and mic_source.target:
+            self.device_combo.set(mic_source.target)
+
+    def _set_switch_state(self, widget, enabled):
+        if enabled:
+            widget.select()
+            return
+        widget.deselect()
+
+    def _active_scene(self):
+        return self.project.get_scene(self.selected_scene_id) or self._program_scene()
+
+    def _program_scene(self):
+        return self.project.get_scene(self.studio_session.program_scene_id) or self.project.active_scene()
+
+    def _refresh_display_options(self):
+        self.displays = self.display_manager.list_monitors()
+        labels = [monitor.to_label() for monitor in self.displays]
+        self._display_labels = {label: monitor.index for label, monitor in zip(labels, self.displays)}
+        self.display_combo.configure(values=labels or ["Display 1"])
+        self._sync_display_combo()
+
+    def _sync_display_combo(self):
+        if not getattr(self, "_display_labels", None):
+            return
+        for label, index in self._display_labels.items():
+            if index == self.selected_display_index:
+                self.display_combo.set(label)
+                return
+        first_label = next(iter(self._display_labels))
+        self.display_combo.set(first_label)
+        self.selected_display_index = self._display_labels[first_label]
+
+    def _selected_display_monitor(self):
+        return self.display_manager.get_monitor(self.selected_display_index)
+
+    def _on_display_selected(self, label):
+        self.selected_display_index = self._display_labels.get(label, 1)
+        self.recording_mode = "screen"
+        self.selected_rect = None
+        self._sync_active_scene_video_source()
+        self._apply_mode_visuals()
+        self._refresh_dashboard()
+
+    def _on_transition_changed(self, label):
+        mapping = {
+            "CUT": TransitionKind.CUT,
+            "FADE": TransitionKind.FADE,
+            "SLIDE": TransitionKind.SLIDE,
+        }
+        self.studio_session = self.session_service.set_transition(
+            self.studio_session,
+            mapping.get(label, TransitionKind.CUT),
+        )
+        self._refresh_dashboard()
+
+    def _take_preview_to_program(self):
+        self.project, self.studio_session = self.session_service.take(self.project, self.studio_session)
+        self._refresh_dashboard()
+
+    def _refresh_dashboard(self):
+        preview_scene = self._active_scene()
+        program_scene = self._program_scene()
+        self._ensure_selected_source(preview_scene)
+        self._refresh_status_bar(preview_scene, program_scene)
+        self._render_scene_list()
+        self._render_source_list(preview_scene)
+        self._render_mixer(preview_scene)
+        self._render_inspector(preview_scene)
+        self.preview_widget.render(preview_scene)
+        self.program_widget.render(program_scene)
+        self.preview_scene_label.configure(text=preview_scene.name)
+        self.program_scene_label.configure(text=program_scene.name)
+        self.preview_caption_label.configure(
+            text=f"{format_preview_caption(preview_scene)} • {self.studio_session.transition.kind.value.upper()}",
+        )
+
+    def _ensure_selected_source(self, scene):
+        if self.selected_source_id and scene.get_source(self.selected_source_id):
+            return
+        primary = scene.primary_video_source()
+        if primary:
+            self.selected_source_id = primary.source_id
+            return
+        self.selected_source_id = scene.sources[0].source_id if scene.sources else None
+
+    def _refresh_status_bar(self, preview_scene, program_scene):
+        encoder = self.recorder.get_best_encoder()
+        encoder_short = "NVENC" if "nvenc" in encoder else "QSV" if "qsv" in encoder else "AMF" if "amf" in encoder else "CPU"
+        state_text = "REC" if self.recorder.is_recording else "READY"
+        state_color = STUDIO_WARN if self.recorder.is_recording else STUDIO_GO
+        display_name = self._selected_display_monitor().name if self.recording_mode == "screen" else self.recording_mode.upper()
+        self.session_status_label.configure(text=state_text, fg_color=state_color)
+        self.session_scene_label.configure(text=program_scene.name.upper(), fg_color="#28445B")
+        self.header_subtitle.configure(text=f"Preview: {preview_scene.name} • Program: {program_scene.name}")
+        transition_name = self.studio_session.transition.kind.value.upper()
+        self.preview_mode_label.configure(text=f"{display_name.upper()} • {transition_name} • {encoder_short} • {self.current_fps} FPS")
+        self.fps_label.configure(text=f"{self.current_fps} FPS • {self.current_quality.upper()} • {encoder_short}")
+        self.output_label.configure(text=self.recorder.get_output_dir())
+        take_text = "Preview matches program" if preview_scene.scene_id == program_scene.scene_id else f"Ready to TAKE via {transition_name}"
+        self.take_status_label.configure(text=take_text)
+
+    def _render_scene_list(self):
+        self._clear_frame(self.scene_list)
+        for scene in self.project.scenes:
+            self._create_scene_card(scene).pack(fill="x", pady=6)
+
+    def _render_source_list(self, scene):
+        self._clear_frame(self.source_list)
+        for source in scene.ordered_sources():
+            self._create_source_row(source).pack(fill="x", pady=6)
+
+    def _render_mixer(self, scene):
+        self._clear_frame(self.mixer_list)
+        channels = scene.audio_sources()
+        if not channels:
+            self._create_empty_label(self.mixer_list, "No audio channels in this scene").pack(fill="x", pady=10)
+            return
+        for source in channels:
+            strip = MixerStrip(self.mixer_list, source, self._update_source_volume, self._toggle_source_mute)
+            strip.pack(fill="x", pady=6)
+
+    def _render_inspector(self, scene):
+        self._clear_frame(self.inspector_body)
+        source = scene.get_source(self.selected_source_id) if self.selected_source_id else None
+        if source is None:
+            self._create_empty_label(self.inspector_body, "Select a source to inspect").pack(fill="x", pady=14)
+            return
+
+        self._create_inspector_value("Name", source.name).pack(fill="x", pady=6)
+        self._create_inspector_value("Type", format_source_kind(source.kind)).pack(fill="x", pady=6)
+        self._create_inspector_value("Placement", format_bounds(source.bounds)).pack(fill="x", pady=6)
+        self._create_inspector_value("State", format_source_caption(source)).pack(fill="x", pady=6)
+        if source.is_audio():
+            self._create_inspector_slider("Volume", source.volume, self._update_source_volume, source.source_id).pack(
+                fill="x", pady=(16, 8)
+            )
+        if source.is_video():
+            self._create_inspector_slider("Opacity", source.opacity, self._update_source_opacity, source.source_id).pack(
+                fill="x", pady=(16, 8)
+            )
+
+    def _create_scene_card(self, scene):
+        is_active = scene.scene_id == self.selected_scene_id
+        is_program = scene.scene_id == self.studio_session.program_scene_id
+        state_label = (
+            "PREVIEW / PROGRAM"
+            if is_active and is_program
+            else "PREVIEW"
+            if is_active
+            else "PROGRAM"
+            if is_program
+            else "SCENE"
+        )
+        card = ctk.CTkButton(
+            self.scene_list,
+            text=f"{scene.name}\n{state_label} • {format_scene_summary(scene)}",
+            anchor="w",
+            height=64,
+            corner_radius=16,
+            fg_color=STUDIO_ACCENT if is_active else "#8E4A33" if is_program else STUDIO_PANEL_ALT,
+            hover_color="#1D5F7A" if is_active else "#B56042" if is_program else "#24384C",
+            text_color=STUDIO_TEXT,
+            command=lambda sid=scene.scene_id: self._select_scene(sid),
+        )
+        return card
+
+    def _create_source_row(self, source):
+        row = ctk.CTkFrame(self.source_list, fg_color=STUDIO_PANEL_ALT, corner_radius=16)
+        main = ctk.CTkButton(
+            row,
+            text=f"{source.name}\n{format_source_caption(source)}",
+            anchor="w",
+            height=56,
+            fg_color="transparent",
+            hover_color="#22384A",
+            text_color=STUDIO_TEXT,
+            command=lambda sid=source.source_id: self._select_source(sid),
+        )
+        main.pack(side="left", fill="x", expand=True, padx=(4, 6), pady=4)
+        self._create_action_button(row, "ON" if source.enabled else "OFF", lambda sid=source.source_id: self._toggle_source_enabled(sid)).pack(side="left", padx=4)
+        action_text = "MUTE" if source.is_audio() else "TOP"
+        action_command = lambda sid=source.source_id: self._toggle_source_mute(sid, not source.muted) if source.is_audio() else self._move_source_to_top(sid)
+        self._create_action_button(row, action_text, action_command).pack(side="left", padx=(0, 6))
+        return row
+
+    def _create_panel_title(self, master, title, action):
+        header = ctk.CTkFrame(master, fg_color="transparent")
+        header.pack(fill="x", padx=14, pady=(14, 10))
+        ctk.CTkLabel(header, text=title, font=("Bahnschrift", 18, "bold"), text_color=STUDIO_TEXT).pack(side="left")
+        if action:
+            self._create_action_button(header, "ADD", action).pack(side="right")
+
+    def _create_pill(self, master, text, color):
+        label = ctk.CTkLabel(
+            master,
+            text=f"  {text}  ",
+            fg_color=color,
+            corner_radius=999,
+            text_color=STUDIO_TEXT,
+            font=("Consolas", 11, "bold"),
+        )
+        label.pack(side="left", padx=6)
+        return label
+
+    def _create_icon_button(self, master, image, command):
+        return ctk.CTkButton(
+            master,
+            text="",
+            image=image,
+            width=42,
+            height=42,
+            corner_radius=14,
+            fg_color=STUDIO_PANEL,
+            hover_color="#213446",
+            command=command,
+        )
+
+    def _create_mode_button(self, master, text, command):
+        return ctk.CTkButton(
+            master,
+            text=text,
+            height=38,
+            corner_radius=14,
+            fg_color=STUDIO_PANEL,
+            hover_color="#274559",
+            text_color=STUDIO_TEXT,
+            command=command,
+        )
+
+    def _create_action_button(self, master, text, command):
+        return ctk.CTkButton(
+            master,
+            text=text,
+            width=58,
+            height=30,
+            corner_radius=12,
+            fg_color="#243A4D",
+            hover_color="#31516B",
+            text_color=STUDIO_TEXT,
+            font=("Consolas", 10, "bold"),
+            command=command,
+        )
+
+    def _create_empty_label(self, master, text):
+        return ctk.CTkLabel(master, text=text, text_color=STUDIO_MUTED, font=("Consolas", 11))
+
+    def _create_inspector_value(self, label, value):
+        frame = ctk.CTkFrame(self.inspector_body, fg_color=STUDIO_PANEL_ALT, corner_radius=14)
+        ctk.CTkLabel(frame, text=label.upper(), text_color=STUDIO_MUTED, font=("Consolas", 10, "bold")).pack(anchor="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(frame, text=value, text_color=STUDIO_TEXT, font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=12, pady=(0, 10))
+        return frame
+
+    def _create_inspector_slider(self, label, value, callback, source_id):
+        frame = ctk.CTkFrame(self.inspector_body, fg_color=STUDIO_PANEL_ALT, corner_radius=14)
+        ctk.CTkLabel(frame, text=label.upper(), text_color=STUDIO_MUTED, font=("Consolas", 10, "bold")).pack(anchor="w", padx=12, pady=(10, 8))
+        slider = ctk.CTkSlider(frame, from_=0, to=1, number_of_steps=20, progress_color=STUDIO_ACCENT, command=lambda raw: callback(source_id, float(raw)))
+        slider.pack(fill="x", padx=12, pady=(0, 10))
+        slider.set(value)
+        return frame
+
+    def _clear_frame(self, frame):
+        for child in frame.winfo_children():
+            child.destroy()
     
     def _load_audio_devices_thread(self):
         """Load audio devices using FFmpeg for correct names"""
@@ -576,12 +1114,11 @@ class NeoRecorderApp(ctk.CTk):
         if names:
             self.device_combo.configure(values=names)
             self.device_combo.set(names[0])
-            # Try to start monitoring for default device
-            self._start_vu_monitoring(names[0])
         else:
             self.device_combo.configure(values=["No devices"])
             self.device_combo.set("No devices")
         
+        self._on_audio_settings_changed()
         self.update_vu_meter()
 
     def _start_vu_monitoring(self, selected_name):
@@ -605,44 +1142,126 @@ class NeoRecorderApp(ctk.CTk):
         except Exception:
             pass
 
+    def _select_scene(self, scene_id):
+        self.selected_scene_id = scene_id
+        self.studio_session = self.session_service.set_preview_scene(self.project, self.studio_session, scene_id)
+        self.selected_source_id = None
+        self._sync_controls_from_scene()
+        self._apply_mode_visuals()
+        self._refresh_dashboard()
+
+    def _add_scene(self):
+        name = f"Scene {len(self.project.scenes) + 1}"
+        self.project = self.project_service.add_scene(self.project, name)
+        self.selected_scene_id = self.project.scenes[-1].scene_id
+        self.studio_session = self.session_service.set_preview_scene(self.project, self.studio_session, self.selected_scene_id)
+        self._sync_active_scene_video_source()
+        self._refresh_dashboard()
+
+    def _select_source(self, source_id):
+        self.selected_source_id = source_id
+        self._refresh_dashboard()
+
+    def _toggle_source_enabled(self, source_id):
+        scene = self._active_scene()
+        source = scene.get_source(source_id)
+        if source is None:
+            return
+        self.project = self.project_service.enable_source(
+            self.project,
+            scene.scene_id,
+            source_id,
+            not source.enabled,
+        )
+        self._refresh_dashboard()
+
+    def _toggle_source_mute(self, source_id, muted):
+        self.project = self.project_service.mute_source(self.project, self._active_scene().scene_id, source_id, muted)
+        self._refresh_dashboard()
+
+    def _move_source_to_top(self, source_id):
+        max_z = max((source.z_index for source in self._active_scene().sources), default=0)
+        self.project = self.project_service.reorder_source(
+            self.project,
+            self._active_scene().scene_id,
+            source_id,
+            max_z + 1,
+        )
+        self._refresh_dashboard()
+
+    def _update_source_volume(self, source_id, volume):
+        self.project = self.project_service.set_source_volume(
+            self.project,
+            self._active_scene().scene_id,
+            source_id,
+            volume,
+        )
+        self._refresh_dashboard()
+
+    def _update_source_opacity(self, source_id, opacity):
+        self.project = self.project_service.set_source_opacity(
+            self.project,
+            self._active_scene().scene_id,
+            source_id,
+            opacity,
+        )
+        self._refresh_dashboard()
+
+    def _on_audio_settings_changed(self, _value=None):
+        current_name = self.device_combo.get()
+        if self.mic_switch.get() and current_name not in {"", self.t("loading"), "No devices"}:
+            self._start_vu_monitoring(current_name)
+        else:
+            self.audio_manager.stop_monitoring()
+        self._sync_audio_sources()
+        self._refresh_dashboard()
+
     def set_mode(self, mode):
         self.recording_mode = mode
-        self.window_combo.pack_forget()
-        self.selected_rect = None
-        
-        default_color = "#1F6AA5"
-        selected_color = NEON_BLUE
-        
-        self.btn_screen.configure(fg_color=selected_color if mode == "screen" else default_color)
-        self.btn_region.configure(fg_color=selected_color if mode == "region" else default_color)
-        self.btn_window.configure(fg_color=selected_color if mode == "window" else default_color)
+        self.selected_rect = None if mode == "screen" else self.selected_rect
+        self._sync_active_scene_video_source()
+        self._apply_mode_visuals()
+        self._refresh_dashboard()
+
+    def _apply_mode_visuals(self):
+        selected = STUDIO_ACCENT
+        idle = STUDIO_PANEL
+        self.btn_screen.configure(fg_color=selected if self.recording_mode == "screen" else idle)
+        self.btn_region.configure(fg_color=selected if self.recording_mode == "region" else idle)
+        self.btn_window.configure(fg_color=selected if self.recording_mode == "window" else idle)
 
     def select_region(self):
-        self.set_mode("region")
+        self.recording_mode = "region"
         from gui.overlay import RegionOverlay
-        overlay = RegionOverlay(self, self.on_region_selected)
+        RegionOverlay(self, self.on_region_selected)
 
     def on_region_selected(self, rect):
         self.selected_rect = rect
+        self._sync_active_scene_video_source()
+        self._apply_mode_visuals()
+        self._refresh_dashboard()
 
     def show_window_selector(self):
-        self.set_mode("window")
+        self.recording_mode = "window"
         self.active_windows = self.window_finder.get_active_windows()
         titles = [w['title'] for w in self.active_windows]
         if titles:
             self.window_combo.configure(values=titles)
             self.window_combo.set(titles[0])
-            self.window_combo.pack(pady=5, after=self.mode_frame)
             self.on_window_selected(titles[0])
         else:
             self.window_combo.configure(values=[self.t("no_windows")])
             self.window_combo.set(self.t("no_windows"))
+        self._apply_mode_visuals()
+        self._refresh_dashboard()
 
     def on_window_selected(self, title):
         for w in self.active_windows:
             if w['title'] == title:
                 self.selected_window_hwnd = w['hwnd']
                 self.selected_rect = self.window_finder.get_window_rect(self.selected_window_hwnd)
+                self._sync_active_scene_video_source()
+                self._refresh_dashboard()
                 break
 
     def toggle_record(self):
@@ -652,7 +1271,7 @@ class NeoRecorderApp(ctk.CTk):
             self.stop_recording()
 
     def start_recording(self):
-        self.rec_btn.configure(image=self.icon_stop, fg_color="#333333")
+        self.rec_btn.configure(image=self.icon_stop, fg_color="#67293A", hover_color="#803145")
         
         # Gather params immediately
         self.record_params = {
@@ -680,16 +1299,13 @@ class NeoRecorderApp(ctk.CTk):
         
         # Start timer speculatively, it will correct itself
         self.update_timer()
+        self._refresh_dashboard()
 
     def _start_recording_worker(self):
         """Background worker to start ffmpeg process"""
         try:
-            result = self.recorder.start(
-                mode=self.recording_mode, 
-                rect=self.selected_rect, 
-                mic=self.record_params["mic"], 
-                system=self.record_params["system"]
-            )
+            request = self._create_recording_request()
+            result = self.recorder.start_request(request)
             
             if not result:
                 # Failed synchronously
@@ -699,6 +1315,81 @@ class NeoRecorderApp(ctk.CTk):
         except Exception as e:
             self.recorder.is_recording = False
             self.after(0, lambda: self.on_recording_error(f"Startup error: {e}"))
+
+    def _create_recording_request(self):
+        self._sync_active_scene_video_source()
+        self._sync_audio_sources()
+        return self.recording_planner.build_request(self._program_scene())
+
+    def _selected_window_title(self) -> str:
+        if self.recording_mode != "window":
+            return ""
+        if not hasattr(self, "window_combo"):
+            return ""
+        return self.window_combo.get()
+
+    def _sync_active_scene_video_source(self):
+        scene = self._active_scene()
+        primary = self._source_from_mode(scene)
+        overlays = list(scene.overlay_video_sources())
+        audio_sources = [source for source in scene.sources if source.is_audio()]
+        self.project = self.project_service.replace_sources(
+            self.project,
+            scene.scene_id,
+            [primary, *overlays, *audio_sources],
+        )
+        self.selected_source_id = primary.source_id
+
+    def _source_from_mode(self, scene):
+        if self.recording_mode == "screen":
+            existing = scene.primary_video_source()
+            monitor = self._selected_display_monitor()
+            name = existing.display_name() if existing and existing.kind.value == "display_capture" else monitor.name
+            return self.project_service.create_display_source(
+                name=name,
+                monitor_index=monitor.index,
+                monitor_name=monitor.name,
+                bounds=monitor.bounds.to_rect(),
+            )
+        if self.recording_mode == "window":
+            return self.project_service.create_window_source(
+                self._selected_window_title() or "Window Capture",
+                self.selected_window_hwnd,
+                self.selected_rect,
+            )
+        rect = self.selected_rect or (0, 0, 1280, 720)
+        return self.project_service.create_region_source(rect)
+
+    def _sync_audio_sources(self):
+        scene = self._active_scene()
+        sources = [source for source in scene.sources if not source.is_audio()]
+        mic_source = self._preserve_audio_source(scene, "microphone_input")
+        system_source = self._preserve_audio_source(scene, "system_audio")
+        if mic_source:
+            sources.append(mic_source)
+        if system_source:
+            sources.append(system_source)
+        self.project = self.project_service.replace_sources(self.project, scene.scene_id, sources)
+
+    def _preserve_audio_source(self, scene, kind):
+        current = next((source for source in scene.sources if source.kind.value == kind), None)
+        if kind == "microphone_input":
+            device_name = self.device_combo.get()
+            if not self.mic_switch.get() or device_name in {"", self.t("loading"), "No devices"}:
+                return None
+            base = current if current and current.target == device_name else self.project_service.create_microphone_source(device_name)
+            return base.with_volume(current.volume if current else 1.0).with_muted(current.muted if current else False)
+        if not self.sys_audio_switch.get():
+            return None
+        base = current or self.project_service.create_system_audio_source()
+        return base.with_volume(current.volume if current else 1.0).with_muted(current.muted if current else False)
+
+    def _mode_from_source(self, source):
+        if source.kind.value == "display_capture":
+            return "screen"
+        if source.kind.value == "window_capture":
+            return "window"
+        return "region"
 
     def on_pause_recording(self, should_pause: bool) -> bool:
         if should_pause:
@@ -716,7 +1407,7 @@ class NeoRecorderApp(ctk.CTk):
         result = self.recorder.stop()
         
         self.deiconify()
-        self.rec_btn.configure(image=self.icon_rec, fg_color="transparent")
+        self.rec_btn.configure(image=self.icon_rec, fg_color="#203345", hover_color="#28465E")
         self.timer_label.configure(text="00:00:00")
         
         # Results are shown
@@ -733,6 +1424,7 @@ class NeoRecorderApp(ctk.CTk):
         if hasattr(self, 'audio_manager') and hasattr(self, 'devices'):
             current_name = self.device_combo.get()
             self._start_vu_monitoring(current_name)
+        self._refresh_dashboard()
 
     def update_timer(self):
         if self.recorder.is_recording:
@@ -779,6 +1471,9 @@ class NeoRecorderApp(ctk.CTk):
     def _quick_record(self, rect):
         self.selected_rect = rect
         self.recording_mode = "region"
+        self._sync_active_scene_video_source()
+        self._apply_mode_visuals()
+        self._refresh_dashboard()
         self.start_recording()
 
     def _minimize_to_tray(self):

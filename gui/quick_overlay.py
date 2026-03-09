@@ -9,6 +9,7 @@ from typing import Callable, Optional, Tuple
 import ctypes
 from PIL import ImageGrab, ImageTk, ImageEnhance
 from config import NEON_BLUE, settings
+from utils.display_manager import get_display_manager
 
 # Windows constants
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
@@ -32,10 +33,14 @@ class QuickOverlay:
         self.current_mode = "screenshot"
         self._closed = False
         self._selecting = False
+        self._display_manager = get_display_manager()
         
-        # Screen info
-        self.screen_width = master.winfo_screenwidth()
-        self.screen_height = master.winfo_screenheight()
+        # Virtual desktop info
+        bounds = self._display_manager.get_virtual_bounds()
+        self.screen_left = bounds.left
+        self.screen_top = bounds.top
+        self.screen_width = bounds.width
+        self.screen_height = bounds.height
         
         # Settings
         self.dim_screen = settings.get("overlay_dim_screen", True)
@@ -44,7 +49,7 @@ class QuickOverlay:
         self.screenshot = None
         self.bg_image = None
         try:
-            self.screenshot = ImageGrab.grab()
+            self.screenshot = self._grab_background()
             if self.dim_screen:
                 enhancer = ImageEnhance.Brightness(self.screenshot)
                 self.screenshot = enhancer.enhance(0.4)
@@ -65,7 +70,7 @@ class QuickOverlay:
         """Create fullscreen selection overlay"""
         self.selection_win = tk.Toplevel(self.master)
         self.selection_win.overrideredirect(True)
-        self.selection_win.geometry(f"{self.screen_width}x{self.screen_height}+0+0")
+        self.selection_win.geometry(self._virtual_geometry())
         self.selection_win.attributes("-topmost", True)
         self.selection_win.configure(bg="black", cursor="cross")
         
@@ -103,12 +108,10 @@ class QuickOverlay:
         # Position
         toolbar_width = 180
         toolbar_height = 50
-        x = (self.screen_width - toolbar_width) // 2
-        y = 30
-        self.toolbar.geometry(f"{toolbar_width}x{toolbar_height}+{x}+{y}")
-        
-        # Store position for hit testing
-        self.toolbar_rect = (x, y, x + toolbar_width, y + toolbar_height)
+        x = self.screen_left + (self.screen_width - toolbar_width) // 2
+        y = self.screen_top + 30
+        self.toolbar.geometry(f"{toolbar_width}x{toolbar_height}{self._axis(x)}{self._axis(y)}")
+        self._set_toolbar_rect(x, y, toolbar_width, toolbar_height)
         
         # Exclude from capture
         self.toolbar.after(10, self._set_exclusion)
@@ -178,6 +181,25 @@ class QuickOverlay:
         # Keep toolbar lifted
         self.toolbar.lift()
         self.toolbar.after(100, self._keep_lifted)
+
+    @staticmethod
+    def _grab_background():
+        try:
+            return ImageGrab.grab(all_screens=True)
+        except TypeError:
+            return ImageGrab.grab()
+
+    def _virtual_geometry(self):
+        return f"{self.screen_width}x{self.screen_height}{self._axis(self.screen_left)}{self._axis(self.screen_top)}"
+
+    @staticmethod
+    def _axis(value):
+        return f"+{value}" if value >= 0 else str(value)
+
+    def _set_toolbar_rect(self, x, y, width, height):
+        local_x = x - self.screen_left
+        local_y = y - self.screen_top
+        self.toolbar_rect = (local_x, local_y, local_x + width, local_y + height)
     
     def _set_exclusion(self):
         """Exclude toolbar from capture"""
@@ -283,7 +305,7 @@ class QuickOverlay:
         
         if (x2 - x1) > 10 and (y2 - y1) > 10:
             self._closed = True
-            rect = (x1, y1, x2, y2)
+            rect = self._to_absolute_rect(x1, y1, x2, y2)
             self._cleanup()
             
             if self.current_mode == "screenshot":
@@ -299,6 +321,14 @@ class QuickOverlay:
             self.start_y = None
             self.rect_id = None
             self.size_label_id = None
+
+    def _to_absolute_rect(self, x1, y1, x2, y2):
+        return (
+            x1 + self.screen_left,
+            y1 + self.screen_top,
+            x2 + self.screen_left,
+            y2 + self.screen_top,
+        )
     
     def _close(self):
         """Close overlay"""
@@ -327,12 +357,12 @@ class QuickOverlay:
     def _do_drag(self, event):
         x = self.toolbar.winfo_x() + (event.x - self._drag_x)
         y = self.toolbar.winfo_y() + (event.y - self._drag_y)
-        self.toolbar.geometry(f"+{x}+{y}")
+        self.toolbar.geometry(f"{self._axis(x)}{self._axis(y)}")
         # Update rect
         self.toolbar.update_idletasks()
         w = self.toolbar.winfo_width()
         h = self.toolbar.winfo_height()
-        self.toolbar_rect = (x, y, x + w, y + h)
+        self._set_toolbar_rect(x, y, w, h)
     
     def destroy(self):
         self._close()

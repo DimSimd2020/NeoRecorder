@@ -8,11 +8,10 @@ Screen Recorder v1.3.0 for NeoRecorder.
 
 import os
 import datetime
-import time
 import threading
 from typing import Optional, Dict, Callable, List
 from utils.ffmpeg_handler import FFmpegHandler, RecordingProgress
-from utils.logger import log_recording_start, log_recording_stop, log_error, get_logger
+from utils.logger import log_recording_start, log_recording_stop
 from config import DEFAULT_FORMAT, DEFAULT_FPS, DEFAULT_QUALITY
 
 
@@ -99,7 +98,7 @@ class ScreenRecorder:
             else:
                 print(f"Invalid quality preset: {quality_preset}")
 
-    def start(self, mode="fullscreen", rect=None, mic=None, system=False) -> Optional[str]:
+    def start(self, mode="fullscreen", rect=None, mic=None, system=False, scene_plan=None) -> Optional[str]:
         """
         Start recording.
         Returns output path if started successfully, None otherwise.
@@ -123,6 +122,7 @@ class ScreenRecorder:
                 rect=rect,
                 mic=mic,
                 system=system,
+                scene_plan=scene_plan,
                 framerate=self.fps,
                 quality_preset=self.quality
             )
@@ -133,12 +133,22 @@ class ScreenRecorder:
                     self.current_output_path,
                     self.fps,
                     self.quality,
-                    self.handler.get_best_encoder()
+                    getattr(self.handler, "current_encoder", None) or self.handler.get_best_encoder()
                 )
                 return self.current_output_path
             else:
                 self.current_output_path = None
                 return None
+
+    def start_request(self, request) -> Optional[str]:
+        """Start recording from a planner request."""
+        return self.start(
+            mode=request.mode,
+            rect=request.rect,
+            mic=request.mic,
+            system=request.system,
+            scene_plan=request.plan,
+        )
 
     def stop(self) -> Optional[Dict]:
         """Stop recording and return metadata dict"""
