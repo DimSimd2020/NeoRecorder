@@ -83,6 +83,7 @@ utils/screenshot
 
 utils/ffmpeg_handler  
 core/recorder
+core/runtime
 
 ---
 
@@ -250,6 +251,8 @@ UI → Infrastructure напрямую
 
 - Recorder state machine
 - Studio session state
+- Broadcast runtime state
+- Output session state
 - Scene state
 - Source state
 

@@ -11,6 +11,11 @@ SOURCE_KIND_LABELS = {
     SourceKind.REGION: "Region",
     SourceKind.MICROPHONE: "Microphone",
     SourceKind.SYSTEM_AUDIO: "System Audio",
+    SourceKind.BROWSER: "Browser",
+    SourceKind.IMAGE: "Image",
+    SourceKind.TEXT: "Text",
+    SourceKind.COLOR: "Color",
+    SourceKind.MEDIA: "Media",
 }
 
 
@@ -29,11 +34,20 @@ def format_bounds(bounds: Bounds | None) -> str:
 def format_source_caption(source: CaptureSource) -> str:
     """Return a compact source description."""
     if source.is_audio():
-        suffix = "Muted" if source.muted else f"{int(source.volume * 100)}%"
-        return f"{format_source_kind(source.kind)} • {suffix}"
+        status = "Muted" if source.muted else f"{int(source.volume * 100)}%"
+        flags = _join_flags(
+            status,
+            f"{source.audio.gain_db:+.1f}dB" if source.audio.gain_db else None,
+            "Solo" if source.audio.solo else None,
+            source.audio.monitoring_mode.value.replace("_", " ").title()
+            if source.audio.monitoring_mode.value != "off"
+            else None,
+        )
+        return f"{format_source_kind(source.kind)} • {flags}"
     if source.kind == SourceKind.DISPLAY and source.display_index():
-        return f"{format_source_kind(source.kind)} • D{source.display_index()} • Z{source.z_index}"
-    return f"{format_source_kind(source.kind)} • Z{source.z_index}"
+        prefix = f"{format_source_kind(source.kind)} • D{source.display_index()} • Z{source.z_index}"
+        return _append_video_flags(prefix, source)
+    return _append_video_flags(f"{format_source_kind(source.kind)} • Z{source.z_index}", source)
 
 
 def format_scene_summary(scene: Scene) -> str:
@@ -49,3 +63,16 @@ def format_preview_caption(scene: Scene) -> str:
     video_count = len(scene.video_sources())
     overlay_count = len(scene.overlay_video_sources())
     return f"{video_count} layers • {overlay_count} overlays"
+
+
+def _append_video_flags(prefix: str, source: CaptureSource) -> str:
+    flags = _join_flags(
+        "Hidden" if not source.transform.visible else None,
+        "Locked" if source.transform.locked else None,
+        f"Rot {int(source.transform.rotation_deg)}°" if source.transform.rotation_deg else None,
+    )
+    return f"{prefix} • {flags}" if flags else prefix
+
+
+def _join_flags(*parts: str | None) -> str:
+    return " • ".join(part for part in parts if part)

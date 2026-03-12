@@ -95,6 +95,30 @@ def test_capture_source_state_mutators_return_copies(fresh_import):
     assert source.z_index == 0
 
 
+def test_capture_source_transform_and_audio_mutators_return_copies(fresh_import):
+    models = load_models(fresh_import)
+    source = models.CaptureSource("1", "Overlay", models.SourceKind.IMAGE)
+
+    updated = source.with_transform(position_x=10, scale_x=1.5, visible=False, locked=True).with_audio(
+        gain_db=4.5,
+        sync_offset_ms=120,
+        solo=True,
+        peak_level=0.8,
+        rms_level=0.4,
+    )
+
+    assert updated.transform.position_x == 10
+    assert updated.transform.scale_x == 1.5
+    assert updated.transform.visible is False
+    assert updated.transform.locked is True
+    assert updated.audio.gain_db == 4.5
+    assert updated.audio.sync_offset_ms == 120
+    assert updated.audio.solo is True
+    assert updated.audio.peak_level == 0.8
+    assert source.transform.visible is True
+    assert source.audio.gain_db == 0.0
+
+
 def test_capture_source_display_metadata_helpers(fresh_import):
     models = load_models(fresh_import)
     source = models.CaptureSource(
@@ -162,6 +186,15 @@ def test_scene_mixed_audio_sources_excludes_muted_and_zero_volume(fresh_import):
     assert scene.mixed_audio_sources() == (enabled,)
 
 
+def test_scene_mixed_audio_sources_respects_solo(fresh_import):
+    models = load_models(fresh_import)
+    mic_a = models.CaptureSource("1", "Mic A", models.SourceKind.MICROPHONE, volume=0.7)
+    mic_b = models.CaptureSource("2", "Mic B", models.SourceKind.MICROPHONE, volume=0.6).with_audio(solo=True)
+    scene = models.Scene(scene_id="scene", name="Main", sources=(mic_a, mic_b))
+
+    assert scene.mixed_audio_sources() == (mic_b,)
+
+
 def test_scene_primary_and_overlay_video_sources(fresh_import):
     models = load_models(fresh_import)
     base = models.CaptureSource("1", "Base", models.SourceKind.DISPLAY, z_index=0)
@@ -176,6 +209,15 @@ def test_scene_primary_and_overlay_video_sources(fresh_import):
 
     assert scene.primary_video_source() == base
     assert scene.overlay_video_sources() == (overlay,)
+
+
+def test_scene_video_sources_skip_hidden_sources(fresh_import):
+    models = load_models(fresh_import)
+    visible = models.CaptureSource("1", "Visible", models.SourceKind.DISPLAY)
+    hidden = models.CaptureSource("2", "Hidden", models.SourceKind.IMAGE).with_transform(visible=False)
+    scene = models.Scene(scene_id="scene", name="Main", sources=(visible, hidden))
+
+    assert scene.video_sources() == (visible,)
 
 
 def test_scene_add_replace_remove_source(fresh_import):
@@ -282,3 +324,22 @@ def test_project_serialization_roundtrip(fresh_import):
     restored = models.StudioProject.from_dict(project.to_dict())
 
     assert restored == project
+
+
+def test_new_source_kind_roundtrip_preserves_transform_and_audio(fresh_import):
+    models = load_models(fresh_import)
+    source = models.CaptureSource(
+        "browser-1",
+        "Docs",
+        models.SourceKind.BROWSER,
+        bounds=models.Bounds(0, 0, 1280, 720),
+        target="https://example.com",
+        metadata={"url": "https://example.com", "preview_status": "placeholder"},
+    ).with_transform(position_x=40, crop=models.Crop(left=8, top=4), rotation_deg=15).with_audio(
+        monitoring_mode=models.MonitoringMode.MONITOR_AND_OUTPUT,
+        gain_db=3.0,
+    )
+
+    restored = models.CaptureSource.from_dict(source.to_dict())
+
+    assert restored == source

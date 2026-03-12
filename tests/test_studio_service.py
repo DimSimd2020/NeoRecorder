@@ -127,6 +127,33 @@ def test_add_update_remove_source(fresh_import):
     assert project.active_scene().sources == ()
 
 
+def test_duplicate_scene_clones_sources_with_new_ids(fresh_import):
+    _models, service_module = load_modules(fresh_import)
+    service = service_module.StudioProjectService(id_factory=id_factory())
+    project = service.create_project("NeoRecorder")
+    source = service.create_display_source()
+    project = service.add_source(project, project.active_scene_id, source)
+
+    duplicated = service.duplicate_scene(project, project.active_scene_id)
+
+    assert len(duplicated.scenes) == 2
+    assert duplicated.scenes[-1].scene_id != project.active_scene_id
+    assert duplicated.scenes[-1].sources[0].source_id != source.source_id
+
+
+def test_duplicate_source_adds_copy_with_new_id(fresh_import):
+    _models, service_module = load_modules(fresh_import)
+    service = service_module.StudioProjectService(id_factory=id_factory())
+    project = service.create_project("NeoRecorder")
+    source = service.create_display_source()
+    project = service.add_source(project, project.active_scene_id, source)
+
+    updated = service.duplicate_source(project, project.active_scene_id, source.source_id)
+
+    assert len(updated.active_scene().sources) == 2
+    assert updated.active_scene().sources[-1].source_id != source.source_id
+
+
 def test_replace_sources_swaps_scene_sources(fresh_import):
     _models, service_module = load_modules(fresh_import)
     service = service_module.StudioProjectService(id_factory=id_factory())
@@ -298,3 +325,53 @@ def test_enable_source_updates_flag(fresh_import):
     updated = service.enable_source(project, project.active_scene_id, source.source_id, False)
 
     assert updated.active_scene().get_source(source.source_id).enabled is False
+
+
+def test_visibility_lock_and_audio_settings_updates(fresh_import):
+    models, service_module = load_modules(fresh_import)
+    service = service_module.StudioProjectService(id_factory=id_factory())
+    project = service.create_project("NeoRecorder")
+    source = service.create_microphone_source("USB Mic")
+    project = service.add_source(project, project.active_scene_id, source)
+
+    project = service.set_source_visibility(project, project.active_scene_id, source.source_id, False)
+    project = service.lock_source(project, project.active_scene_id, source.source_id, True)
+    project = service.set_source_gain(project, project.active_scene_id, source.source_id, 3.0)
+    project = service.set_source_sync_offset(project, project.active_scene_id, source.source_id, 140)
+    project = service.solo_source(project, project.active_scene_id, source.source_id, True)
+    project = service.set_monitoring_mode(
+        project,
+        project.active_scene_id,
+        source.source_id,
+        models.MonitoringMode.MONITOR_ONLY,
+    )
+    project = service.update_audio_levels(project, project.active_scene_id, source.source_id, 0.7, 0.3)
+
+    updated = project.active_scene().get_source(source.source_id)
+    assert updated.transform.visible is False
+    assert updated.transform.locked is True
+    assert updated.audio.gain_db == 3.0
+    assert updated.audio.sync_offset_ms == 140
+    assert updated.audio.solo is True
+    assert updated.audio.monitoring_mode == models.MonitoringMode.MONITOR_ONLY
+    assert updated.audio.peak_level == 0.7
+
+
+def test_create_new_source_kinds(fresh_import):
+    models, service_module = load_modules(fresh_import)
+    service = service_module.StudioProjectService(id_factory=id_factory())
+
+    browser = service.create_browser_source("https://example.com")
+    image = service.create_image_source("C:/tmp/hero.png")
+    text = service.create_text_source("HELLO")
+    color = service.create_color_source("#FF0000")
+    media = service.create_media_source("C:/tmp/intro.mp4")
+
+    assert browser.kind == models.SourceKind.BROWSER
+    assert image.kind == models.SourceKind.IMAGE
+    assert image.bounds.to_rect() == (0, 0, 1280, 720)
+    assert text.metadata["text"] == "HELLO"
+    assert text.bounds.to_rect() == (0, 0, 640, 120)
+    assert color.metadata["color"] == "#FF0000"
+    assert media.kind == models.SourceKind.MEDIA
+    assert media.bounds.to_rect() == (0, 0, 1280, 720)

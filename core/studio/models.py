@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Optional
 
@@ -15,12 +15,23 @@ class SourceKind(str, Enum):
     REGION = "region_capture"
     MICROPHONE = "microphone_input"
     SYSTEM_AUDIO = "system_audio"
+    BROWSER = "browser_source"
+    IMAGE = "image_source"
+    TEXT = "text_source"
+    COLOR = "color_source"
+    MEDIA = "media_source"
 
     def is_audio(self) -> bool:
         return self in {self.MICROPHONE, self.SYSTEM_AUDIO}
 
     def is_video(self) -> bool:
         return not self.is_audio()
+
+
+class MonitoringMode(str, Enum):
+    OFF = "off"
+    MONITOR_ONLY = "monitor_only"
+    MONITOR_AND_OUTPUT = "monitor_and_output"
 
 
 @dataclass(frozen=True)
@@ -52,12 +63,7 @@ class Bounds:
         return (self.x, self.y, self.x + self.width, self.y + self.height)
 
     def to_dict(self) -> dict[str, int]:
-        return {
-            "x": self.x,
-            "y": self.y,
-            "width": self.width,
-            "height": self.height,
-        }
+        return {"x": self.x, "y": self.y, "width": self.width, "height": self.height}
 
     @classmethod
     def from_dict(cls, payload: dict[str, int]) -> "Bounds":
@@ -66,6 +72,117 @@ class Bounds:
             y=payload["y"],
             width=payload["width"],
             height=payload["height"],
+        )
+
+
+@dataclass(frozen=True)
+class Crop:
+    left: int = 0
+    top: int = 0
+    right: int = 0
+    bottom: int = 0
+
+    def __post_init__(self):
+        for name, value in self.to_dict().items():
+            if value < 0:
+                raise ValueError(f"{name} crop must be non-negative, got {value}")
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "left": self.left,
+            "top": self.top,
+            "right": self.right,
+            "bottom": self.bottom,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, int]) -> "Crop":
+        return cls(
+            left=payload.get("left", 0),
+            top=payload.get("top", 0),
+            right=payload.get("right", 0),
+            bottom=payload.get("bottom", 0),
+        )
+
+
+@dataclass(frozen=True)
+class SourceTransform:
+    position_x: int = 0
+    position_y: int = 0
+    scale_x: float = 1.0
+    scale_y: float = 1.0
+    crop: Crop = field(default_factory=Crop)
+    rotation_deg: float = 0.0
+    visible: bool = True
+    locked: bool = False
+
+    def __post_init__(self):
+        if self.scale_x <= 0 or self.scale_y <= 0:
+            raise ValueError("scale must be positive")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "position_x": self.position_x,
+            "position_y": self.position_y,
+            "scale_x": self.scale_x,
+            "scale_y": self.scale_y,
+            "crop": self.crop.to_dict(),
+            "rotation_deg": self.rotation_deg,
+            "visible": self.visible,
+            "locked": self.locked,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Optional[dict[str, Any]]) -> "SourceTransform":
+        if not payload:
+            return cls()
+        return cls(
+            position_x=payload.get("position_x", 0),
+            position_y=payload.get("position_y", 0),
+            scale_x=payload.get("scale_x", 1.0),
+            scale_y=payload.get("scale_y", 1.0),
+            crop=Crop.from_dict(payload.get("crop", {})),
+            rotation_deg=payload.get("rotation_deg", 0.0),
+            visible=payload.get("visible", True),
+            locked=payload.get("locked", False),
+        )
+
+
+@dataclass(frozen=True)
+class AudioConfig:
+    gain_db: float = 0.0
+    sync_offset_ms: int = 0
+    solo: bool = False
+    monitoring_mode: MonitoringMode = MonitoringMode.OFF
+    peak_level: float = 0.0
+    rms_level: float = 0.0
+
+    def __post_init__(self):
+        for name, value in {"peak_level": self.peak_level, "rms_level": self.rms_level}.items():
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be between 0.0 and 1.0, got {value}")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "gain_db": self.gain_db,
+            "sync_offset_ms": self.sync_offset_ms,
+            "solo": self.solo,
+            "monitoring_mode": self.monitoring_mode.value,
+            "peak_level": self.peak_level,
+            "rms_level": self.rms_level,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Optional[dict[str, Any]]) -> "AudioConfig":
+        if not payload:
+            return cls()
+        return cls(
+            gain_db=payload.get("gain_db", 0.0),
+            sync_offset_ms=payload.get("sync_offset_ms", 0),
+            solo=payload.get("solo", False),
+            monitoring_mode=MonitoringMode(payload.get("monitoring_mode", MonitoringMode.OFF.value)),
+            peak_level=payload.get("peak_level", 0.0),
+            rms_level=payload.get("rms_level", 0.0),
         )
 
 
@@ -84,6 +201,8 @@ class CaptureSource:
     volume: float = 1.0
     muted: bool = False
     opacity: float = 1.0
+    transform: SourceTransform = field(default_factory=SourceTransform)
+    audio: AudioConfig = field(default_factory=AudioConfig)
 
     def __post_init__(self):
         self._validate_range("volume", self.volume)
@@ -100,6 +219,12 @@ class CaptureSource:
     def is_video(self) -> bool:
         return self.kind.is_video()
 
+    def is_visible(self) -> bool:
+        return self.enabled and self.transform.visible
+
+    def is_locked(self) -> bool:
+        return self.transform.locked
+
     def display_index(self) -> Optional[int]:
         if self.kind != SourceKind.DISPLAY:
             return None
@@ -113,80 +238,38 @@ class CaptureSource:
     def is_mixed_audio(self) -> bool:
         return self.is_audio() and self.enabled and not self.muted and self.volume > 0.0
 
-    def with_enabled(self, enabled: bool) -> "CaptureSource":
-        return CaptureSource(
-            source_id=self.source_id,
-            name=self.name,
-            kind=self.kind,
-            enabled=enabled,
-            bounds=self.bounds,
-            target=self.target,
-            metadata=dict(self.metadata),
-            z_index=self.z_index,
-            volume=self.volume,
-            muted=self.muted,
-            opacity=self.opacity,
+    def copy_with(self, **changes) -> "CaptureSource":
+        metadata = changes.pop("metadata", None)
+        transform = changes.pop("transform", None)
+        audio = changes.pop("audio", None)
+        return replace(
+            self,
+            metadata=dict(self.metadata if metadata is None else metadata),
+            transform=self.transform if transform is None else transform,
+            audio=self.audio if audio is None else audio,
+            **changes,
         )
+
+    def with_enabled(self, enabled: bool) -> "CaptureSource":
+        return self.copy_with(enabled=enabled)
 
     def with_z_index(self, z_index: int) -> "CaptureSource":
-        return CaptureSource(
-            source_id=self.source_id,
-            name=self.name,
-            kind=self.kind,
-            enabled=self.enabled,
-            bounds=self.bounds,
-            target=self.target,
-            metadata=dict(self.metadata),
-            z_index=z_index,
-            volume=self.volume,
-            muted=self.muted,
-            opacity=self.opacity,
-        )
+        return self.copy_with(z_index=z_index)
 
     def with_volume(self, volume: float) -> "CaptureSource":
-        return CaptureSource(
-            source_id=self.source_id,
-            name=self.name,
-            kind=self.kind,
-            enabled=self.enabled,
-            bounds=self.bounds,
-            target=self.target,
-            metadata=dict(self.metadata),
-            z_index=self.z_index,
-            volume=volume,
-            muted=self.muted,
-            opacity=self.opacity,
-        )
+        return self.copy_with(volume=volume)
 
     def with_muted(self, muted: bool) -> "CaptureSource":
-        return CaptureSource(
-            source_id=self.source_id,
-            name=self.name,
-            kind=self.kind,
-            enabled=self.enabled,
-            bounds=self.bounds,
-            target=self.target,
-            metadata=dict(self.metadata),
-            z_index=self.z_index,
-            volume=self.volume,
-            muted=muted,
-            opacity=self.opacity,
-        )
+        return self.copy_with(muted=muted)
 
     def with_opacity(self, opacity: float) -> "CaptureSource":
-        return CaptureSource(
-            source_id=self.source_id,
-            name=self.name,
-            kind=self.kind,
-            enabled=self.enabled,
-            bounds=self.bounds,
-            target=self.target,
-            metadata=dict(self.metadata),
-            z_index=self.z_index,
-            volume=self.volume,
-            muted=self.muted,
-            opacity=opacity,
-        )
+        return self.copy_with(opacity=opacity)
+
+    def with_transform(self, **changes) -> "CaptureSource":
+        return self.copy_with(transform=replace(self.transform, **changes))
+
+    def with_audio(self, **changes) -> "CaptureSource":
+        return self.copy_with(audio=replace(self.audio, **changes))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -201,6 +284,8 @@ class CaptureSource:
             "volume": self.volume,
             "muted": self.muted,
             "opacity": self.opacity,
+            "transform": self.transform.to_dict(),
+            "audio": self.audio.to_dict(),
         }
 
     @classmethod
@@ -218,6 +303,8 @@ class CaptureSource:
             volume=payload.get("volume", 1.0),
             muted=payload.get("muted", False),
             opacity=payload.get("opacity", 1.0),
+            transform=SourceTransform.from_dict(payload.get("transform")),
+            audio=AudioConfig.from_dict(payload.get("audio")),
         )
 
 
@@ -242,10 +329,13 @@ class Scene:
         return tuple(source for source in self.ordered_sources() if source.is_audio())
 
     def video_sources(self) -> tuple[CaptureSource, ...]:
-        return tuple(source for source in self.ordered_sources() if source.is_video())
+        return tuple(source for source in self.ordered_sources() if source.is_video() and source.is_visible())
 
     def mixed_audio_sources(self) -> tuple[CaptureSource, ...]:
-        return tuple(source for source in self.audio_sources() if source.is_mixed_audio())
+        candidates = tuple(source for source in self.audio_sources() if source.is_mixed_audio())
+        if not any(source.audio.solo for source in candidates):
+            return candidates
+        return tuple(source for source in candidates if source.audio.solo)
 
     def primary_video_source(self) -> Optional[CaptureSource]:
         video_sources = self.video_sources()
@@ -268,8 +358,7 @@ class Scene:
         return self.with_sources(updated)
 
     def remove_source(self, source_id: str) -> "Scene":
-        sources = [source for source in self.sources if source.source_id != source_id]
-        return self.with_sources(sources)
+        return self.with_sources([source for source in self.sources if source.source_id != source_id])
 
     def rename(self, name: str) -> "Scene":
         return Scene(scene_id=self.scene_id, name=name, sources=self.sources)
@@ -307,12 +396,11 @@ class StudioProject:
         return next((scene for scene in self.scenes if scene.scene_id == scene_id), None)
 
     def with_scenes(self, scenes: list[Scene], active_scene_id: Optional[str] = None) -> "StudioProject":
-        resolved_active = active_scene_id or self.active_scene_id
         return StudioProject(
             project_id=self.project_id,
             name=self.name,
             scenes=tuple(scenes),
-            active_scene_id=resolved_active,
+            active_scene_id=active_scene_id or self.active_scene_id,
             version=self.version,
         )
 

@@ -146,6 +146,73 @@ def test_planner_builds_composition_plan_for_multiple_video_sources(fresh_import
     assert request.mode == "screen"
 
 
+def test_planner_applies_transforms_and_crops_to_overlay_rect(fresh_import):
+    models, planner_module = load_modules(fresh_import)
+    overlay = models.CaptureSource(
+        "2",
+        "Overlay",
+        models.SourceKind.REGION,
+        bounds=models.Bounds(10, 20, 100, 80),
+        z_index=5,
+    ).with_transform(
+        position_x=15,
+        position_y=10,
+        scale_x=1.5,
+        scale_y=2.0,
+        crop=models.Crop(left=5, top=10, right=15, bottom=20),
+    )
+    scene = models.Scene(
+        scene_id="scene",
+        name="Main",
+        sources=(models.CaptureSource("1", "Display", models.SourceKind.DISPLAY), overlay),
+    )
+
+    plan = planner_module.SceneRecordingPlanner().build_plan(scene)
+
+    assert plan.overlays[0].rect == (30, 40, 150, 140)
+
+
+def test_planner_marks_rotation_as_preview_only_diagnostic(fresh_import):
+    models, planner_module = load_modules(fresh_import)
+    scene = models.Scene(
+        scene_id="scene",
+        name="Main",
+        sources=(
+            models.CaptureSource("1", "Display", models.SourceKind.DISPLAY),
+            models.CaptureSource(
+                "2",
+                "Browser",
+                models.SourceKind.BROWSER,
+                bounds=models.Bounds(0, 0, 400, 300),
+            ).with_transform(rotation_deg=12),
+        ),
+    )
+
+    plan = planner_module.SceneRecordingPlanner().build_plan(scene)
+
+    assert plan.overlays[0].supported is False
+    assert "preview only" in plan.diagnostics[0]
+
+
+def test_planner_rejects_preview_only_primary_source_for_recording(fresh_import):
+    models, planner_module = load_modules(fresh_import)
+    scene = models.Scene(
+        scene_id="scene",
+        name="Main",
+        sources=(
+            models.CaptureSource(
+                "1",
+                "Browser",
+                models.SourceKind.BROWSER,
+                bounds=models.Bounds(0, 0, 1280, 720),
+            ),
+        ),
+    )
+
+    with pytest.raises(Exception):
+        planner_module.SceneRecordingPlanner().build_request(scene)
+
+
 def test_planner_rejects_window_without_bounds(fresh_import):
     models, planner_module = load_modules(fresh_import)
     scene = models.Scene(
@@ -182,3 +249,28 @@ def test_planner_excludes_muted_audio_from_legacy_request(fresh_import):
     assert len(plan.audio_channels) == 2
     assert request.mic is None
     assert request.system is False
+
+
+def test_planner_preserves_gain_sync_and_monitoring_metadata(fresh_import):
+    models, planner_module = load_modules(fresh_import)
+    source = models.CaptureSource("1", "Mic", models.SourceKind.MICROPHONE, target="USB Mic").with_audio(
+        gain_db=4.0,
+        sync_offset_ms=180,
+        solo=True,
+        monitoring_mode=models.MonitoringMode.MONITOR_AND_OUTPUT,
+        peak_level=0.8,
+        rms_level=0.35,
+    )
+    scene = models.Scene(
+        scene_id="scene",
+        name="Main",
+        sources=(models.CaptureSource("d", "Display", models.SourceKind.DISPLAY), source),
+    )
+
+    channel = planner_module.SceneRecordingPlanner().build_plan(scene).audio_channels[0]
+
+    assert channel.gain_db == 4.0
+    assert channel.sync_offset_ms == 180
+    assert channel.solo is True
+    assert channel.monitoring_mode == "monitor_and_output"
+    assert channel.peak_level == 0.8

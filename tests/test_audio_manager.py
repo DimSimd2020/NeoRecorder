@@ -168,6 +168,7 @@ def test_stop_monitoring_resets_level(fresh_import, monkeypatch):
 
     assert manager.is_monitoring is False
     assert manager.get_vu_level() == 0
+    assert manager.get_audio_levels() == (0, 0)
 
 
 def test_monitor_thread_updates_vu_level(fresh_import, monkeypatch):
@@ -180,6 +181,8 @@ def test_monitor_thread_updates_vu_level(fresh_import, monkeypatch):
     manager._monitor_thread(0)
 
     assert 0 < manager.get_vu_level() <= 1.0
+    peak, rms = manager.get_audio_levels()
+    assert peak >= rms >= 0
     assert stream.stopped is True
     assert stream.closed is True
 

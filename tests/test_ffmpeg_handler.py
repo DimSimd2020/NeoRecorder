@@ -673,3 +673,153 @@ def test_try_ffmpeg_maps_audio_for_filter_graph(fresh_import, monkeypatch, tmp_p
     assert commands[0][commands[0].index("-map") + 1] == "[vout]"
     assert "2:a" in commands[0]
     assert "volume=0.35" in commands[0]
+
+
+def test_start_streaming_requires_configured_stream_settings(fresh_import, monkeypatch, tmp_path):
+    handler_module = load_handler(fresh_import, monkeypatch, tmp_path)
+    models = fresh_import("core.runtime.models")
+    handler = handler_module.FFmpegHandler()
+
+    assert handler.start_streaming(models.StreamSettings(enabled=True)) is False
+
+
+def test_try_ffmpeg_builds_stream_only_output(fresh_import, monkeypatch, tmp_path):
+    handler_module = load_handler(fresh_import, monkeypatch, tmp_path)
+    models = fresh_import("core.runtime.models")
+    handler = handler_module.FFmpegHandler()
+    commands = []
+    stream = models.StreamSettings(enabled=True, server_url="rtmp://localhost/live", stream_key="abc")
+    handler._stream_bridge_url = "udp://127.0.0.1:23000?pkt_size=1316"
+    monkeypatch.setattr(handler, "_encoder_candidates", lambda *_args: ["libx264"])
+    monkeypatch.setattr(handler, "_get_gdigrab_resolution", lambda: (1920, 1080))
+    monkeypatch.setattr(handler, "_start_output_monitor", lambda: None)
+    monkeypatch.setattr(
+        handler_module.subprocess,
+        "Popen",
+        lambda cmd, **kwargs: commands.append(cmd) or PopenStub(),
+    )
+
+    result = handler._try_ffmpeg(None, "gdigrab", None, None, False, None, 60, "balanced", stream_settings=stream)
+
+    assert result is True
+    assert commands[0][-2:] == ["mpegts", "udp://127.0.0.1:23000?pkt_size=1316"]
+
+
+def test_try_ffmpeg_builds_record_and_stream_tee_output(fresh_import, monkeypatch, tmp_path):
+    handler_module = load_handler(fresh_import, monkeypatch, tmp_path)
+    models = fresh_import("core.runtime.models")
+    handler = handler_module.FFmpegHandler()
+    commands = []
+    stream = models.StreamSettings(enabled=True, server_url="rtmp://localhost/live", stream_key="abc")
+    handler._stream_bridge_url = "udp://127.0.0.1:23000?pkt_size=1316"
+    monkeypatch.setattr(handler, "_encoder_candidates", lambda *_args: ["libx264"])
+    monkeypatch.setattr(handler, "_get_gdigrab_resolution", lambda: (1920, 1080))
+    monkeypatch.setattr(handler, "_start_output_monitor", lambda: None)
+    monkeypatch.setattr(
+        handler_module.subprocess,
+        "Popen",
+        lambda cmd, **kwargs: commands.append(cmd) or PopenStub(),
+    )
+
+    result = handler._try_ffmpeg(
+        str(tmp_path / "out.mp4"),
+        "gdigrab",
+        None,
+        None,
+        False,
+        None,
+        60,
+        "balanced",
+        stream_settings=stream,
+    )
+
+    assert result is True
+    assert "tee" in commands[0]
+    assert "[f=mpegts:onfail=ignore]udp://127.0.0.1:23000?pkt_size=1316" in commands[0][-1]
+
+
+def test_start_stream_output_launches_bridge_process(fresh_import, monkeypatch, tmp_path):
+    handler_module = load_handler(fresh_import, monkeypatch, tmp_path)
+    models = fresh_import("core.runtime.models")
+    handler = handler_module.FFmpegHandler()
+    commands = []
+    handler._is_recording = True
+    handler._stream_bridge_url = "udp://127.0.0.1:23000?pkt_size=1316"
+    monkeypatch.setattr(handler, "_start_stream_monitor", lambda: None)
+    monkeypatch.setattr(
+        handler_module.subprocess,
+        "Popen",
+        lambda cmd, **kwargs: commands.append(cmd) or PopenStub(),
+    )
+
+    result = handler.start_stream_output(
+        models.StreamSettings(enabled=True, server_url="rtmp://localhost/live", stream_key="abc")
+    )
+
+    assert result is True
+    assert "udp://127.0.0.1:23000?fifo_size=1000000&overrun_nonfatal=1" in commands[0]
+    assert commands[0][-1] == "rtmp://localhost/live/abc"
+    assert handler.get_output_session().stream_state == models.StreamState.LIVE
+
+
+def test_stream_monitor_reconnects_failed_bridge(fresh_import, monkeypatch, tmp_path):
+    handler_module = load_handler(fresh_import, monkeypatch, tmp_path)
+    models = fresh_import("core.runtime.models")
+    handler = handler_module.FFmpegHandler()
+    handler._is_recording = True
+    handler._stream_should_run = True
+    handler._stream_settings = models.StreamSettings(enabled=True, server_url="rtmp://localhost/live", stream_key="abc")
+    handler._stream_process = PopenStub(returncode=1)
+    calls = []
+
+    monkeypatch.setattr(handler, "start_stream_output", lambda settings: calls.append(settings) or True)
+    sleeps = []
+    monkeypatch.setattr(handler_module.time, "sleep", lambda value: sleeps.append(value))
+
+    class ImmediateThread:
+        def __init__(self, target, daemon=True):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(handler_module.threading, "Thread", ImmediateThread)
+
+    handler._start_stream_monitor()
+
+    assert calls == [handler._stream_settings]
+    assert sleeps == [1.0]
+
+
+def test_get_output_session_reports_last_error_and_safe_mode(fresh_import, monkeypatch, tmp_path):
+    handler_module = load_handler(fresh_import, monkeypatch, tmp_path)
+    models = fresh_import("core.runtime.models")
+    handler = handler_module.FFmpegHandler()
+    handler._is_recording = True
+    handler._output_mode = "record"
+    handler._last_error = "encoder fail"
+    handler._safe_mode_active = True
+
+    session = handler.get_output_session()
+
+    assert session.mode == models.OutputMode.RECORD
+    assert session.last_error == "encoder fail"
+    assert session.software_fallback_active is True
+
+
+def test_stop_recording_stops_stream_process_too(fresh_import, monkeypatch, tmp_path):
+    handler_module = load_handler(fresh_import, monkeypatch, tmp_path)
+    handler = handler_module.FFmpegHandler()
+    handler.start_timestamp = 10.0
+    handler._is_recording = True
+    handler.process = PopenStub()
+    handler._stream_process = PopenStub()
+    handler._stream_state = fresh_import("core.runtime.models").StreamState.LIVE
+    handler._segments = ["a.mp4"]
+    monkeypatch.setattr(handler_module.time, "time", lambda: 20.0)
+    monkeypatch.setattr(handler, "_merge_segments", lambda: "final.mp4")
+    monkeypatch.setattr(handler, "_cleanup_temp", lambda: None)
+
+    handler.stop_recording()
+
+    assert handler._stream_process is None
