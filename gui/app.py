@@ -7,6 +7,15 @@ import customtkinter as ctk
 from PIL import Image
 from config import *
 from core.audio_manager import AudioManager
+from core.runtime.models import (
+    BroadcastRuntimeState,
+    RuntimeEvent,
+    RuntimeEventType,
+    StreamState,
+    StreamServicePreset,
+    StreamSettings,
+)
+from core.runtime.orchestrator import BroadcastOrchestrator
 from core.window_finder import WindowFinder
 from core.recorder import ScreenRecorder
 from core.studio.planner import SceneRecordingPlanner
@@ -378,6 +387,7 @@ class NeoRecorderApp(ctk.CTk):
         self.audio_manager = AudioManager()
         self.window_finder = WindowFinder()
         self.recorder = ScreenRecorder()
+        self.broadcast = BroadcastOrchestrator(self.recorder)
         
         # Apply save settings to recorder
         self.recorder.set_fps(self.current_fps)
@@ -414,15 +424,36 @@ class NeoRecorderApp(ctk.CTk):
         self.widget = None
         self.quick_overlay = None
         self.tray = None
+        self.stream_service_labels = {
+            "Custom RTMP": StreamServicePreset.CUSTOM_RTMP,
+            "Twitch": StreamServicePreset.TWITCH,
+            "YouTube": StreamServicePreset.YOUTUBE,
+        }
 
     def on_recording_warning(self, message):
         """Handle recording warning from backend"""
         from utils.notifications import show_warning_notification
-        self.after(0, lambda: show_warning_notification("Note", message))
+        self.broadcast.report_event(RuntimeEvent(self._runtime_event_type_from_message(message, warning=True), message))
+        self.after(0, lambda: (self._refresh_dashboard(), show_warning_notification("Note", message)))
 
     def on_recording_error(self, error):
         """Handle recording error from backend"""
+        event_type = self._runtime_event_type_from_message(str(error))
+        self.broadcast.report_event(RuntimeEvent(event_type, str(error)))
         self.after(0, lambda: self._handle_recording_error_ui(error))
+
+    @staticmethod
+    def _runtime_event_type_from_message(message, warning: bool = False):
+        lowered = str(message).lower()
+        if "reconnect" in lowered or "rtmp" in lowered or "stream output" in lowered:
+            return RuntimeEventType.STREAM_CONNECT_FAILED if not warning else RuntimeEventType.INFO
+        if "bridge" in lowered:
+            return RuntimeEventType.STREAM_BRIDGE_FAILED
+        if "encoder" in lowered or "safe mode" in lowered:
+            return RuntimeEventType.ENCODER_FAILED if not warning else RuntimeEventType.INFO
+        if "restore" in lowered:
+            return RuntimeEventType.SESSION_RESTORE_FAILED
+        return RuntimeEventType.FFMPEG_EXITED_UNEXPECTEDLY if not warning else RuntimeEventType.INFO
         
     def _handle_recording_error_ui(self, error):
         # Stop UI state
@@ -439,8 +470,7 @@ class NeoRecorderApp(ctk.CTk):
         
     def on_recording_complete_event(self, result):
         """Handle async recording stop (e.g. from hotkey or error recovery)"""
-        # This might be called when we stop manually too, so check state
-        pass
+        self.broadcast.runtime_state = BroadcastRuntimeState.PREVIEW_READY
 
     def _init_tray(self):
         """Initialize system tray"""
@@ -616,6 +646,13 @@ class NeoRecorderApp(ctk.CTk):
         )
         self._create_mode_button(source_tools, self.t("mode_region"), self.select_region).pack(side="left", padx=6)
         self._create_mode_button(source_tools, self.t("mode_window"), self.show_window_selector).pack(side="left", padx=6)
+        source_add_row = ctk.CTkFrame(self.source_panel, fg_color="transparent")
+        source_add_row.pack(fill="x", padx=12, pady=(0, 8))
+        self._create_action_button(source_add_row, "IMG", lambda: self._add_synthetic_source("image")).pack(side="left", padx=(0, 6))
+        self._create_action_button(source_add_row, "TXT", lambda: self._add_synthetic_source("text")).pack(side="left", padx=6)
+        self._create_action_button(source_add_row, "CLR", lambda: self._add_synthetic_source("color")).pack(side="left", padx=6)
+        self._create_action_button(source_add_row, "WEB", lambda: self._add_synthetic_source("browser")).pack(side="left", padx=6)
+        self._create_action_button(source_add_row, "MED", lambda: self._add_synthetic_source("media")).pack(side="left", padx=6)
         self.source_list = ctk.CTkScrollableFrame(self.source_panel, fg_color="transparent")
         self.source_list.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
@@ -727,6 +764,44 @@ class NeoRecorderApp(ctk.CTk):
         )
         self.take_status_label.pack(side="left", padx=8)
 
+        stream_row = ctk.CTkFrame(self.transport_panel, fg_color="transparent")
+        stream_row.pack(fill="x", padx=16, pady=(0, 10))
+        self.stream_enabled_switch = ctk.CTkSwitch(stream_row, text="Stream", progress_color=STUDIO_WARN)
+        self.stream_enabled_switch.pack(side="left", padx=(0, 8))
+        self.stream_service_combo = ctk.CTkComboBox(
+            stream_row,
+            values=list(self.stream_service_labels.keys()),
+            width=140,
+        )
+        self.stream_service_combo.pack(side="left", padx=(0, 8))
+        self.stream_url_entry = ctk.CTkEntry(stream_row, width=280, placeholder_text="rtmp://server/app")
+        self.stream_url_entry.pack(side="left", padx=(0, 8))
+        self.stream_key_entry = ctk.CTkEntry(stream_row, width=180, placeholder_text="stream key")
+        self.stream_key_entry.pack(side="left", padx=(0, 8))
+
+        stream_status_row = ctk.CTkFrame(self.transport_panel, fg_color="transparent")
+        stream_status_row.pack(fill="x", padx=16, pady=(0, 16))
+        self.stream_bitrate_entry = ctk.CTkEntry(stream_status_row, width=100, placeholder_text="kbps")
+        self.stream_bitrate_entry.pack(side="left", padx=(0, 8))
+        self.stream_button = ctk.CTkButton(
+            stream_status_row,
+            text="START STREAM",
+            width=160,
+            height=38,
+            corner_radius=14,
+            fg_color="#5B2D3A",
+            hover_color="#7D394A",
+            command=self.toggle_streaming,
+        )
+        self.stream_button.pack(side="left")
+        self.stream_status_label = ctk.CTkLabel(
+            stream_status_row,
+            text="Offline",
+            font=("Consolas", 11, "bold"),
+            text_color=STUDIO_MUTED,
+        )
+        self.stream_status_label.pack(side="left", padx=12)
+
     def _build_audio_panel(self):
         self.audio_panel = ctk.CTkFrame(self.right_column, fg_color=STUDIO_PANEL, corner_radius=22)
         self.audio_panel.pack(fill="x", pady=(0, 12))
@@ -790,6 +865,8 @@ class NeoRecorderApp(ctk.CTk):
         if self.recording_mode == "region" and not self.selected_rect:
             self.recording_mode = "screen"
         self._refresh_display_options()
+        self._sync_stream_controls()
+        self.broadcast.mark_preview_ready()
         self.transition_combo.set(self.studio_session.transition.kind.value.upper())
         self._ensure_active_scene_video_source()
         self._sync_controls_from_scene()
@@ -822,6 +899,38 @@ class NeoRecorderApp(ctk.CTk):
         self._set_switch_state(self.sys_audio_switch, system_source is not None and system_source.enabled)
         if mic_source and mic_source.target:
             self.device_combo.set(mic_source.target)
+
+    def _sync_stream_controls(self):
+        self._set_switch_state(self.stream_enabled_switch, self._settings.get("stream_enabled", False))
+        self.stream_service_combo.set(self._stream_service_label())
+        self.stream_url_entry.insert(0, self._settings.get("stream_server_url", ""))
+        self.stream_key_entry.insert(0, self._settings.get("stream_key", ""))
+        self.stream_bitrate_entry.insert(0, str(self._settings.get("stream_target_bitrate", 6000)))
+
+    def _stream_service_label(self):
+        configured = self._settings.get("stream_service_preset", StreamServicePreset.CUSTOM_RTMP.value)
+        for label, preset in self.stream_service_labels.items():
+            if preset.value == configured:
+                return label
+        return "Custom RTMP"
+
+    def _stream_settings_from_ui(self) -> StreamSettings:
+        bitrate_text = self.stream_bitrate_entry.get().strip() or "6000"
+        preset = self.stream_service_labels.get(self.stream_service_combo.get(), StreamServicePreset.CUSTOM_RTMP)
+        return StreamSettings(
+            enabled=bool(self.stream_enabled_switch.get()),
+            service_preset=preset,
+            server_url=self.stream_url_entry.get().strip(),
+            stream_key=self.stream_key_entry.get().strip(),
+            target_bitrate=int(bitrate_text),
+        )
+
+    def _persist_stream_settings(self, stream_settings: StreamSettings):
+        self._settings.set("stream_enabled", stream_settings.enabled)
+        self._settings.set("stream_service_preset", stream_settings.service_preset.value)
+        self._settings.set("stream_server_url", stream_settings.server_url)
+        self._settings.set("stream_key", stream_settings.stream_key)
+        self._settings.set("stream_target_bitrate", stream_settings.target_bitrate)
 
     def _set_switch_state(self, widget, enabled):
         if enabled:
@@ -909,8 +1018,8 @@ class NeoRecorderApp(ctk.CTk):
     def _refresh_status_bar(self, preview_scene, program_scene):
         encoder = self.recorder.get_best_encoder()
         encoder_short = "NVENC" if "nvenc" in encoder else "QSV" if "qsv" in encoder else "AMF" if "amf" in encoder else "CPU"
-        state_text = "REC" if self.recorder.is_recording else "READY"
-        state_color = STUDIO_WARN if self.recorder.is_recording else STUDIO_GO
+        state_text = self._runtime_badge_text()
+        state_color = "#D2536C" if "REC" in state_text else "#D7862B" if "LIVE" in state_text else STUDIO_GO
         display_name = self._selected_display_monitor().name if self.recording_mode == "screen" else self.recording_mode.upper()
         self.session_status_label.configure(text=state_text, fg_color=state_color)
         self.session_scene_label.configure(text=program_scene.name.upper(), fg_color="#28445B")
@@ -919,8 +1028,42 @@ class NeoRecorderApp(ctk.CTk):
         self.preview_mode_label.configure(text=f"{display_name.upper()} • {transition_name} • {encoder_short} • {self.current_fps} FPS")
         self.fps_label.configure(text=f"{self.current_fps} FPS • {self.current_quality.upper()} • {encoder_short}")
         self.output_label.configure(text=self.recorder.get_output_dir())
+        self.stream_status_label.configure(text=self._stream_status_text())
+        self.stream_button.configure(text="STOP STREAM" if "LIVE" in self._stream_status_text().upper() else "START STREAM")
         take_text = "Preview matches program" if preview_scene.scene_id == program_scene.scene_id else f"Ready to TAKE via {transition_name}"
         self.take_status_label.configure(text=take_text)
+
+    def _runtime_badge_text(self):
+        state = self.broadcast.runtime_state
+        if state == BroadcastRuntimeState.RECORDING_AND_STREAMING:
+            return "REC+LIVE"
+        if state == BroadcastRuntimeState.RECORDING:
+            return "REC"
+        if state == BroadcastRuntimeState.STREAMING:
+            return "LIVE"
+        if state == BroadcastRuntimeState.RECOVERING:
+            return "RECOVER"
+        if state == BroadcastRuntimeState.FAILED:
+            return "ERROR"
+        return "READY"
+
+    def _stream_status_text(self):
+        summary = self.broadcast.diagnostics.latest_summary()
+        session = self.broadcast.output_session
+        state = self.broadcast.runtime_state
+        if session.stream_state == StreamState.RECONNECTING:
+            return f"Reconnecting ({session.reconnect_attempts})"
+        if state == BroadcastRuntimeState.RECORDING_AND_STREAMING:
+            suffix = " SW" if session.software_fallback_active else ""
+            return f"Live + Recording{suffix}"
+        if state == BroadcastRuntimeState.STREAMING:
+            suffix = " SW" if session.software_fallback_active else ""
+            return f"Live{suffix}"
+        if state == BroadcastRuntimeState.RECOVERING:
+            return f"Recovering • {summary}"
+        if state == BroadcastRuntimeState.FAILED:
+            return session.last_error or summary
+        return "Offline"
 
     def _render_scene_list(self):
         self._clear_frame(self.scene_list)
@@ -939,7 +1082,13 @@ class NeoRecorderApp(ctk.CTk):
             self._create_empty_label(self.mixer_list, "No audio channels in this scene").pack(fill="x", pady=10)
             return
         for source in channels:
-            strip = MixerStrip(self.mixer_list, source, self._update_source_volume, self._toggle_source_mute)
+            strip = MixerStrip(
+                self.mixer_list,
+                source,
+                self._update_source_volume,
+                self._toggle_source_mute,
+                self._toggle_source_solo,
+            )
             strip.pack(fill="x", pady=6)
 
     def _render_inspector(self, scene):
@@ -953,10 +1102,58 @@ class NeoRecorderApp(ctk.CTk):
         self._create_inspector_value("Type", format_source_kind(source.kind)).pack(fill="x", pady=6)
         self._create_inspector_value("Placement", format_bounds(source.bounds)).pack(fill="x", pady=6)
         self._create_inspector_value("State", format_source_caption(source)).pack(fill="x", pady=6)
+        if source.is_video():
+            transform = source.transform
+            transform_value = (
+                f"Pos {transform.position_x},{transform.position_y} • "
+                f"Scale {transform.scale_x:.2f}x{transform.scale_y:.2f} • "
+                f"Rot {transform.rotation_deg:.0f}°"
+            )
+            self._create_inspector_value("Transform", transform_value).pack(fill="x", pady=6)
+            self._create_inspector_range_slider(
+                "Pos X",
+                transform.position_x,
+                -960,
+                960,
+                192,
+                lambda sid, raw: self._update_source_transform(sid, "position_x", raw),
+                source.source_id,
+            ).pack(fill="x", pady=(10, 8))
+            self._create_inspector_range_slider(
+                "Pos Y",
+                transform.position_y,
+                -540,
+                540,
+                108,
+                lambda sid, raw: self._update_source_transform(sid, "position_y", raw),
+                source.source_id,
+            ).pack(fill="x", pady=(0, 8))
+            self._create_inspector_range_slider(
+                "Scale",
+                transform.scale_x,
+                0.25,
+                2.0,
+                35,
+                lambda sid, raw: self._update_source_scale(sid, raw),
+                source.source_id,
+            ).pack(fill="x", pady=(0, 8))
+            self._create_inspector_range_slider(
+                "Rotate",
+                transform.rotation_deg,
+                0,
+                360,
+                72,
+                lambda sid, raw: self._update_source_transform(sid, "rotation_deg", raw),
+                source.source_id,
+            ).pack(fill="x", pady=(0, 8))
         if source.is_audio():
             self._create_inspector_slider("Volume", source.volume, self._update_source_volume, source.source_id).pack(
                 fill="x", pady=(16, 8)
             )
+            self._create_inspector_value(
+                "Audio",
+                f"Gain {source.audio.gain_db:+.1f}dB • Sync {source.audio.sync_offset_ms}ms",
+            ).pack(fill="x", pady=6)
         if source.is_video():
             self._create_inspector_slider("Opacity", source.opacity, self._update_source_opacity, source.source_id).pack(
                 fill="x", pady=(16, 8)
@@ -974,8 +1171,9 @@ class NeoRecorderApp(ctk.CTk):
             if is_program
             else "SCENE"
         )
+        row = ctk.CTkFrame(self.scene_list, fg_color="transparent")
         card = ctk.CTkButton(
-            self.scene_list,
+            row,
             text=f"{scene.name}\n{state_label} • {format_scene_summary(scene)}",
             anchor="w",
             height=64,
@@ -985,7 +1183,9 @@ class NeoRecorderApp(ctk.CTk):
             text_color=STUDIO_TEXT,
             command=lambda sid=scene.scene_id: self._select_scene(sid),
         )
-        return card
+        card.pack(side="left", fill="x", expand=True)
+        self._create_action_button(row, "DUP", lambda sid=scene.scene_id: self._duplicate_scene(sid)).pack(side="left", padx=(6, 0))
+        return row
 
     def _create_source_row(self, source):
         row = ctk.CTkFrame(self.source_list, fg_color=STUDIO_PANEL_ALT, corner_radius=16)
@@ -1004,6 +1204,12 @@ class NeoRecorderApp(ctk.CTk):
         action_text = "MUTE" if source.is_audio() else "TOP"
         action_command = lambda sid=source.source_id: self._toggle_source_mute(sid, not source.muted) if source.is_audio() else self._move_source_to_top(sid)
         self._create_action_button(row, action_text, action_command).pack(side="left", padx=(0, 6))
+        if source.is_video():
+            vis_text = "HIDE" if source.transform.visible else "SHOW"
+            self._create_action_button(row, vis_text, lambda sid=source.source_id: self._toggle_source_visibility(sid)).pack(side="left", padx=(0, 6))
+            lock_text = "UNLK" if source.transform.locked else "LOCK"
+            self._create_action_button(row, lock_text, lambda sid=source.source_id: self._toggle_source_lock(sid)).pack(side="left", padx=(0, 6))
+        self._create_action_button(row, "DUP", lambda sid=source.source_id: self._duplicate_source(sid)).pack(side="left", padx=(0, 6))
         return row
 
     def _create_panel_title(self, master, title, action):
@@ -1074,9 +1280,19 @@ class NeoRecorderApp(ctk.CTk):
         return frame
 
     def _create_inspector_slider(self, label, value, callback, source_id):
+        return self._create_inspector_range_slider(label, value, 0, 1, 20, callback, source_id)
+
+    def _create_inspector_range_slider(self, label, value, minimum, maximum, steps, callback, source_id):
         frame = ctk.CTkFrame(self.inspector_body, fg_color=STUDIO_PANEL_ALT, corner_radius=14)
         ctk.CTkLabel(frame, text=label.upper(), text_color=STUDIO_MUTED, font=("Consolas", 10, "bold")).pack(anchor="w", padx=12, pady=(10, 8))
-        slider = ctk.CTkSlider(frame, from_=0, to=1, number_of_steps=20, progress_color=STUDIO_ACCENT, command=lambda raw: callback(source_id, float(raw)))
+        slider = ctk.CTkSlider(
+            frame,
+            from_=minimum,
+            to=maximum,
+            number_of_steps=steps,
+            progress_color=STUDIO_ACCENT,
+            command=lambda raw: callback(source_id, float(raw)),
+        )
         slider.pack(fill="x", padx=12, pady=(0, 10))
         slider.set(value)
         return frame
@@ -1158,6 +1374,28 @@ class NeoRecorderApp(ctk.CTk):
         self._sync_active_scene_video_source()
         self._refresh_dashboard()
 
+    def _duplicate_scene(self, scene_id):
+        self.project = self.project_service.duplicate_scene(self.project, scene_id)
+        self.selected_scene_id = self.project.active_scene_id
+        self.studio_session = self.session_service.set_preview_scene(self.project, self.studio_session, self.selected_scene_id)
+        self._refresh_dashboard()
+
+    def _add_synthetic_source(self, source_type):
+        scene = self._active_scene()
+        factories = {
+            "image": lambda: self.project_service.create_image_source("image://placeholder", name="Image Layer"),
+            "text": lambda: self.project_service.create_text_source("Sample Text", name="Text Layer"),
+            "color": lambda: self.project_service.create_color_source("#27C1F4", name="Accent Color"),
+            "browser": lambda: self.project_service.create_browser_source("https://example.com", name="Browser Layer"),
+            "media": lambda: self.project_service.create_media_source("media://placeholder.mp4", name="Media Layer"),
+        }
+        source = factories[source_type]()
+        max_z = max((item.z_index for item in scene.sources), default=0)
+        source = source.with_z_index(max_z + 1)
+        self.project = self.project_service.add_source(self.project, scene.scene_id, source)
+        self.selected_source_id = source.source_id
+        self._refresh_dashboard()
+
     def _select_source(self, source_id):
         self.selected_source_id = source_id
         self._refresh_dashboard()
@@ -1175,8 +1413,46 @@ class NeoRecorderApp(ctk.CTk):
         )
         self._refresh_dashboard()
 
+    def _toggle_source_visibility(self, source_id):
+        scene = self._active_scene()
+        source = scene.get_source(source_id)
+        if source is None:
+            return
+        self.project = self.project_service.set_source_visibility(
+            self.project,
+            scene.scene_id,
+            source_id,
+            not source.transform.visible,
+        )
+        self._refresh_dashboard()
+
+    def _toggle_source_lock(self, source_id):
+        scene = self._active_scene()
+        source = scene.get_source(source_id)
+        if source is None:
+            return
+        self.project = self.project_service.lock_source(
+            self.project,
+            scene.scene_id,
+            source_id,
+            not source.transform.locked,
+        )
+        self._refresh_dashboard()
+
+    def _duplicate_source(self, source_id):
+        self.project = self.project_service.duplicate_source(
+            self.project,
+            self._active_scene().scene_id,
+            source_id,
+        )
+        self._refresh_dashboard()
+
     def _toggle_source_mute(self, source_id, muted):
         self.project = self.project_service.mute_source(self.project, self._active_scene().scene_id, source_id, muted)
+        self._refresh_dashboard()
+
+    def _toggle_source_solo(self, source_id, solo):
+        self.project = self.project_service.solo_source(self.project, self._active_scene().scene_id, source_id, solo)
         self._refresh_dashboard()
 
     def _move_source_to_top(self, source_id):
@@ -1204,6 +1480,27 @@ class NeoRecorderApp(ctk.CTk):
             self._active_scene().scene_id,
             source_id,
             opacity,
+        )
+        self._refresh_dashboard()
+
+    def _update_source_transform(self, source_id, field_name, raw_value):
+        value = int(raw_value) if field_name in {"position_x", "position_y", "rotation_deg"} else float(raw_value)
+        self.project = self.project_service.set_source_transform(
+            self.project,
+            self._active_scene().scene_id,
+            source_id,
+            **{field_name: value},
+        )
+        self._refresh_dashboard()
+
+    def _update_source_scale(self, source_id, raw_value):
+        value = float(raw_value)
+        self.project = self.project_service.set_source_transform(
+            self.project,
+            self._active_scene().scene_id,
+            source_id,
+            scale_x=value,
+            scale_y=value,
         )
         self._refresh_dashboard()
 
@@ -1270,6 +1567,45 @@ class NeoRecorderApp(ctk.CTk):
         else:
             self.stop_recording()
 
+    def toggle_streaming(self):
+        if self.broadcast.runtime_state == BroadcastRuntimeState.RECORDING_AND_STREAMING:
+            self.broadcast.disable_stream()
+            self._refresh_dashboard()
+            return
+        if self.broadcast.runtime_state == BroadcastRuntimeState.STREAMING:
+            self.stop_recording()
+            return
+        if self.recorder.is_recording:
+            stream_settings = self._stream_settings_from_ui()
+            self._persist_stream_settings(stream_settings)
+            if not stream_settings.is_configured():
+                show_error_notification("Streaming Error", "Streaming requires server URL and stream key.")
+                return
+            if not self.broadcast.enable_stream(stream_settings):
+                show_error_notification("Streaming Error", "Failed to hot-start stream output.")
+            self._refresh_dashboard()
+            return
+        self.start_streaming()
+
+    def start_streaming(self):
+        threading.Thread(target=self._start_streaming_worker, daemon=True).start()
+        self._refresh_dashboard()
+
+    def _start_streaming_worker(self):
+        try:
+            request = self._create_recording_request()
+            stream_settings = self._stream_settings_from_ui()
+            self._persist_stream_settings(stream_settings)
+            if not stream_settings.is_configured():
+                raise ValueError("Streaming requires server URL and stream key")
+            result = self.broadcast.start_streaming(request, stream_settings)
+            if result is None:
+                self.after(0, lambda: self.on_recording_error("Failed to start stream"))
+                return
+            self.after(0, self._refresh_dashboard)
+        except Exception as exc:
+            self.after(0, lambda: self.on_recording_error(f"Stream startup error: {exc}"))
+
     def start_recording(self):
         self.rec_btn.configure(image=self.icon_stop, fg_color="#67293A", hover_color="#803145")
         
@@ -1305,7 +1641,14 @@ class NeoRecorderApp(ctk.CTk):
         """Background worker to start ffmpeg process"""
         try:
             request = self._create_recording_request()
-            result = self.recorder.start_request(request)
+            stream_settings = self._stream_settings_from_ui()
+            self._persist_stream_settings(stream_settings)
+            if stream_settings.enabled and not stream_settings.is_configured():
+                raise ValueError("Streaming is enabled, but server URL or stream key is missing")
+            if stream_settings.is_configured():
+                result = self.broadcast.start_recording_and_streaming(request, stream_settings)
+            else:
+                result = self.broadcast.start_recording(request)
             
             if not result:
                 # Failed synchronously
@@ -1404,7 +1747,7 @@ class NeoRecorderApp(ctk.CTk):
             self.widget.destroy()
             self.widget = None
         
-        result = self.recorder.stop()
+        result = self.broadcast.stop()
         
         self.deiconify()
         self.rec_btn.configure(image=self.icon_rec, fg_color="#203345", hover_color="#28465E")
@@ -1436,9 +1779,32 @@ class NeoRecorderApp(ctk.CTk):
 
     def update_vu_meter(self):
         if hasattr(self, 'audio_manager') and hasattr(self, 'vu_meter'):
-            level = self.audio_manager.get_vu_level()
-            self.vu_meter.set_level(level)
+            peak_level, rms_level = self.audio_manager.get_audio_levels()
+            self.vu_meter.set_level(peak_level)
+            self._push_audio_levels_to_scene(peak_level, rms_level)
             self.after(50, self.update_vu_meter)
+
+    def _push_audio_levels_to_scene(self, peak_level, rms_level):
+        device_name = self.device_combo.get() if hasattr(self, "device_combo") else ""
+        scene = self._active_scene()
+        source = next(
+            (
+                item
+                for item in scene.audio_sources()
+                if item.kind.value == "microphone_input" and item.target == device_name
+            ),
+            None,
+        )
+        if source is None:
+            return
+        self.project = self.project_service.update_audio_levels(
+            self.project,
+            scene.scene_id,
+            source.source_id,
+            peak_level,
+            rms_level,
+        )
+        self._render_mixer(self._active_scene())
 
     def open_folder(self):
         os.startfile(self.recorder.get_output_dir())

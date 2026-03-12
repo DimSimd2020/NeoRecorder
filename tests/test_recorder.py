@@ -5,6 +5,7 @@ import pytest
 
 class HandlerStub:
     def __init__(self):
+        runtime_models = __import__("core.runtime.models", fromlist=["OutputSession", "OutputMode", "StreamState"])
         self.callbacks = {}
         self.start_calls = []
         self.stop_result = None
@@ -14,12 +15,35 @@ class HandlerStub:
         self.paused = False
         self.elapsed = 12.3
         self.progress = types.SimpleNamespace(frame=120, fps=60.0, bitrate="3000kbits/s")
+        self.stream_started = False
+        self.output_session = runtime_models.OutputSession(stream_state=runtime_models.StreamState.DISABLED)
 
     def set_callbacks(self, **kwargs):
         self.callbacks = kwargs
 
     def start_recording(self, *args, **kwargs):
         self.start_calls.append((args, kwargs))
+        runtime_models = __import__("core.runtime.models", fromlist=["OutputSession", "OutputMode", "StreamState"])
+        self.output_session = runtime_models.OutputSession(
+            mode=runtime_models.OutputMode.RECORD,
+            record_path=args[0] if args else None,
+            bridge_url="udp://127.0.0.1:23000",
+            stream_state=runtime_models.StreamState.DISABLED,
+        )
+        return True
+
+    def start_streaming(self, *args, **kwargs):
+        self.start_calls.append((args, kwargs))
+        runtime_models = __import__("core.runtime.models", fromlist=["OutputSession", "OutputMode", "StreamState"])
+        settings = kwargs.get("stream_settings")
+        self.output_session = runtime_models.OutputSession(
+            mode=runtime_models.OutputMode.STREAM,
+            record_path=None,
+            bridge_url="udp://127.0.0.1:23000",
+            stream_state=runtime_models.StreamState.LIVE,
+            stream_url=settings.output_url() if settings else None,
+        )
+        self.stream_started = True
         return True
 
     def stop_recording(self):
@@ -48,6 +72,33 @@ class HandlerStub:
 
     def get_best_encoder(self):
         return "libx264"
+
+    def start_stream_output(self, stream_settings):
+        self.stream_started = True
+        runtime_models = __import__("core.runtime.models", fromlist=["OutputMode", "StreamState"])
+        mode = self.output_session.mode if self.output_session.mode != runtime_models.OutputMode.IDLE else runtime_models.OutputMode.RECORD_AND_STREAM
+        self.output_session = self.output_session.__class__(
+            mode=mode,
+            record_path=self.output_session.record_path,
+            bridge_url="udp://127.0.0.1:23000",
+            stream_state=runtime_models.StreamState.LIVE,
+            stream_url=stream_settings.output_url(),
+            reconnect_attempts=0,
+        )
+        return True
+
+    def stop_stream_output(self):
+        self.stream_started = False
+        return True
+
+    def is_streaming(self):
+        return self.stream_started
+
+    def get_output_session(self):
+        return self.output_session
+
+    def set_force_safe_mode(self, enabled):
+        self.force_safe_mode = enabled
 
 
 def load_recorder(fresh_import, monkeypatch, tmp_path):
@@ -235,3 +286,66 @@ def test_get_current_settings_returns_snapshot(fresh_import, monkeypatch, tmp_pa
     assert result["fps"] == 120
     assert result["quality"] == "quality"
     assert result["encoder"] == "libx264"
+
+
+def test_recorder_exposes_state_machine_transitions(fresh_import, monkeypatch, tmp_path):
+    recorder_module = load_recorder(fresh_import, monkeypatch, tmp_path)
+    runtime_models = fresh_import("core.runtime.models")
+    recorder = recorder_module.ScreenRecorder()
+    recorder.handler = HandlerStub()
+
+    recorder.start()
+    paused = recorder.pause()
+    resumed = recorder.resume()
+    recorder.stop()
+
+    assert paused is True
+    assert resumed is True
+    assert recorder.state == runtime_models.RecorderState.IDLE
+
+
+def test_start_request_stream_only_uses_extended_signature(fresh_import, monkeypatch, tmp_path):
+    recorder_module = load_recorder(fresh_import, monkeypatch, tmp_path)
+    runtime_models = fresh_import("core.runtime.models")
+    recorder = recorder_module.ScreenRecorder()
+    calls = []
+    monkeypatch.setattr(recorder, "start", lambda **kwargs: calls.append(kwargs) or None)
+    request = types.SimpleNamespace(mode="region", rect=(1, 2, 3, 4), mic="Mic", system=True, plan="plan")
+    stream = runtime_models.StreamSettings(enabled=True, server_url="rtmp://live", stream_key="abc")
+
+    recorder.start_request(request, stream_settings=stream, record_to_file=False)
+
+    assert calls[0]["record_to_file"] is False
+    assert calls[0]["stream_settings"] == stream
+
+
+def test_recorder_enable_and_disable_stream_delegate_to_handler(fresh_import, monkeypatch, tmp_path):
+    recorder_module = load_recorder(fresh_import, monkeypatch, tmp_path)
+    runtime_models = fresh_import("core.runtime.models")
+    recorder = recorder_module.ScreenRecorder()
+    recorder.handler = HandlerStub()
+    recorder.is_recording = True
+    recorder.state = runtime_models.RecorderState.RECORDING
+    stream = runtime_models.StreamSettings(enabled=True, server_url="rtmp://live", stream_key="abc")
+
+    assert recorder.enable_stream(stream) is True
+    assert recorder.is_streaming() is True
+    assert recorder.disable_stream() is True
+
+
+def test_recorder_snapshot_and_restore_output_session(fresh_import, monkeypatch, tmp_path):
+    recorder_module = load_recorder(fresh_import, monkeypatch, tmp_path)
+    runtime_models = fresh_import("core.runtime.models")
+    recorder = recorder_module.ScreenRecorder()
+    recorder.handler = HandlerStub()
+    request = types.SimpleNamespace(mode="region", rect=(1, 2, 3, 4), mic="Mic", system=True, plan="plan")
+    stream = runtime_models.StreamSettings(enabled=True, server_url="rtmp://live", stream_key="abc")
+    recorder.start_request(request, stream_settings=stream, record_to_file=False)
+    snapshot = recorder.snapshot_output_session()
+    calls = []
+    monkeypatch.setattr(recorder, "start_request", lambda *args, **kwargs: calls.append((args, kwargs)) or "restored.mp4")
+
+    result = recorder.restore_output_session(snapshot, prefer_software=True)
+
+    assert result == "restored.mp4"
+    assert calls[0][1]["record_to_file"] is False

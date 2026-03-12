@@ -48,6 +48,8 @@ else:
 USER_DATA_DIR = os.path.join(os.path.expanduser("~"), "Videos", "NeoRecorder")
 SETTINGS_FILE = os.path.join(USER_DATA_DIR, "settings.json")
 SCREENSHOTS_DIR = os.path.join(USER_DATA_DIR, "Screenshots")
+RUNTIME_DIR = os.path.join(USER_DATA_DIR, "runtime")
+OUTPUT_SESSION_REPORT_FILE = os.path.join(RUNTIME_DIR, "last_output_session.json")
 
 # Default Settings
 DEFAULT_LANG = "ru"
@@ -99,6 +101,12 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "start_with_windows": False,
     "hotkeys": deepcopy(DEFAULT_HOTKEYS),
     "last_mode": "screen",
+    "stream_enabled": False,
+    "stream_service_preset": "custom_rtmp",
+    "stream_server_url": "",
+    "stream_key": "",
+    "stream_encoder_profile": "main",
+    "stream_target_bitrate": 6000,
     # Overlay settings
     "overlay_dim_screen": True,
     "overlay_lock_input": True,
@@ -120,6 +128,7 @@ class Settings:
         """Create required directories"""
         os.makedirs(USER_DATA_DIR, exist_ok=True)
         os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+        os.makedirs(RUNTIME_DIR, exist_ok=True)
     
     def _load(self):
         """Load settings from file"""

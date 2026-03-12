@@ -80,8 +80,9 @@ class ScenePreview(ctk.CTkFrame):
 
     def _draw_layer(self, index, source, scene_bounds):
         x1, y1, x2, y2 = self._resolve_rect(index, source, scene_bounds)
-        fill = self.LAYER_COLORS[index % len(self.LAYER_COLORS)]
-        self.canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline="#B9D7E5", width=2)
+        fill = self._layer_fill(index, source)
+        outline = "#F0C24D" if source.transform.locked else "#B9D7E5"
+        self.canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline=outline, width=2)
         self.canvas.create_text(
             x1 + 14,
             y1 + 14,
@@ -98,6 +99,25 @@ class ScenePreview(ctk.CTkFrame):
             font=("Segoe UI", 10),
             fill="#D2E6F2",
         )
+        meta_text = self._layer_meta_text(source)
+        if meta_text:
+            self.canvas.create_text(
+                x1 + 14,
+                y1 + 52,
+                anchor="nw",
+                text=meta_text,
+                font=("Segoe UI", 9),
+                fill="#E6F0F6",
+            )
+        if source.transform.rotation_deg:
+            self.canvas.create_text(
+                x2 - 12,
+                y1 + 14,
+                anchor="ne",
+                text=f"{int(source.transform.rotation_deg)}°",
+                font=("Segoe UI", 10, "bold"),
+                fill="#F4D35E",
+            )
 
     def _resolve_rect(self, index, source, scene_bounds):
         width = self.preview_width
@@ -116,11 +136,42 @@ class ScenePreview(ctk.CTkFrame):
         inset = min(index * 10, 32)
         return (x1 + inset, y1 + inset, min(x2 + inset, width - 30), min(y2 + inset, height - 30))
 
+    def _layer_fill(self, index, source):
+        if source.kind.value == "color_source":
+            return source.metadata.get("color", self.LAYER_COLORS[index % len(self.LAYER_COLORS)])
+        return self.LAYER_COLORS[index % len(self.LAYER_COLORS)]
+
+    @staticmethod
+    def _layer_meta_text(source):
+        if source.kind.value == "browser_source":
+            return source.metadata.get("url", "Browser placeholder")
+        if source.kind.value == "text_source":
+            return source.metadata.get("text", "")
+        if source.kind.value == "image_source":
+            return source.metadata.get("path", source.target or "Image placeholder")
+        if source.kind.value == "media_source":
+            return source.metadata.get("preview_mode", "Media placeholder")
+        if source.kind.value == "color_source":
+            return source.metadata.get("color", "")
+        return ""
+
     @staticmethod
     def _source_rect(source, scene_bounds):
         if source.bounds is None:
-            return scene_bounds
-        return source.bounds.to_rect()
+            rect = scene_bounds
+        else:
+            rect = source.bounds.to_rect()
+        x1, y1, x2, y2 = rect
+        crop = source.transform.crop
+        cropped_left = x1 + crop.left
+        cropped_top = y1 + crop.top
+        cropped_right = max(cropped_left + 1, x2 - crop.right)
+        cropped_bottom = max(cropped_top + 1, y2 - crop.bottom)
+        width = max(1, int((cropped_right - cropped_left) * source.transform.scale_x))
+        height = max(1, int((cropped_bottom - cropped_top) * source.transform.scale_y))
+        left = cropped_left + source.transform.position_x
+        top = cropped_top + source.transform.position_y
+        return (left, top, left + width, top + height)
 
     @staticmethod
     def _scene_bounds(scene):
@@ -141,11 +192,12 @@ class ScenePreview(ctk.CTkFrame):
 class MixerStrip(ctk.CTkFrame):
     """Simple mixer strip for audio source control."""
 
-    def __init__(self, master, source, on_volume, on_mute, **kwargs):
+    def __init__(self, master, source, on_volume, on_mute, on_solo=None, **kwargs):
         super().__init__(master, fg_color="#1A2230", corner_radius=14, **kwargs)
         self.source = source
         self.on_volume = on_volume
         self.on_mute = on_mute
+        self.on_solo = on_solo
         self._build_ui()
 
     def _build_ui(self):
@@ -169,20 +221,35 @@ class MixerStrip(ctk.CTkFrame):
             hover_color="#D2536C" if self.source.muted else "#2A425A",
             command=lambda: self.on_mute(self.source.source_id, not self.source.muted),
         ).pack(side="right")
+        if self.on_solo:
+            ctk.CTkButton(
+                header,
+                text="SOLO",
+                width=62,
+                height=28,
+                fg_color="#D28A31" if self.source.audio.solo else "#203247",
+                hover_color="#E3A44A" if self.source.audio.solo else "#2A425A",
+                command=lambda: self.on_solo(self.source.source_id, not self.source.audio.solo),
+            ).pack(side="right", padx=(0, 8))
 
         slider_row = ctk.CTkFrame(self, fg_color="transparent")
         slider_row.pack(fill="x", padx=12, pady=(0, 12))
 
-        self.slider = ctk.CTkSlider(
-            slider_row,
-            from_=0,
-            to=1,
-            number_of_steps=20,
-            progress_color=NEON_BLUE,
-            button_color="#F27F29",
-            button_hover_color="#FF9F3E",
-            command=self._on_volume_change,
-        )
+        slider_class = getattr(ctk, "CTkSlider", None)
+        if slider_class is None:
+            self.slider = ctk.CTkFrame(slider_row, fg_color="#203247", height=16)
+            self.slider.set = lambda *_args, **_kwargs: None
+        else:
+            self.slider = slider_class(
+                slider_row,
+                from_=0,
+                to=1,
+                number_of_steps=20,
+                progress_color=NEON_BLUE,
+                button_color="#F27F29",
+                button_hover_color="#FF9F3E",
+                command=self._on_volume_change,
+            )
         self.slider.pack(side="left", fill="x", expand=True, padx=(0, 10))
         self.slider.set(self.source.volume)
 
@@ -193,6 +260,35 @@ class MixerStrip(ctk.CTkFrame):
             text_color="#C2D5E2",
             font=("Segoe UI", 12, "bold"),
         ).pack(side="right")
+        meter_row = ctk.CTkFrame(self, fg_color="transparent")
+        meter_row.pack(fill="x", padx=12, pady=(0, 10))
+        VUMeter(meter_row, width=160, height=8).pack(side="left", fill="x", expand=True, padx=(0, 10))
+        ctk.CTkLabel(
+            meter_row,
+            text=f"PK {int(self.source.audio.peak_level * 100)} • RMS {int(self.source.audio.rms_level * 100)}",
+            text_color="#86A2B6",
+            font=("Segoe UI", 10),
+        ).pack(side="right")
+        info = self._info_text()
+        if info:
+            ctk.CTkLabel(
+                self,
+                text=info,
+                anchor="w",
+                justify="left",
+                text_color="#86A2B6",
+                font=("Segoe UI", 10),
+            ).pack(fill="x", padx=12, pady=(0, 10))
 
     def _on_volume_change(self, value):
         self.on_volume(self.source.source_id, float(value))
+
+    def _info_text(self):
+        parts = []
+        if self.source.audio.gain_db:
+            parts.append(f"Gain {self.source.audio.gain_db:+.1f}dB")
+        if self.source.audio.sync_offset_ms:
+            parts.append(f"Sync {self.source.audio.sync_offset_ms}ms")
+        if self.source.audio.monitoring_mode.value != "off":
+            parts.append(self.source.audio.monitoring_mode.value.replace("_", " ").title())
+        return " • ".join(parts)

@@ -15,6 +15,7 @@ class AudioManager:
         self.current_stream = None
         self.is_monitoring = False
         self.vu_level = 0
+        self.rms_level = 0
         self._lock = threading.Lock()
         self._initialized = False
         self._init_pyaudio()
@@ -99,6 +100,7 @@ class AudioManager:
         # Reset level
         with self._lock:
             self.vu_level = 0
+            self.rms_level = 0
             
         # Give a small time for thread to exit
         import time
@@ -129,9 +131,12 @@ class AudioManager:
                     
                     if len(audio_data) > 0:
                         peak = np.abs(audio_data).max()
+                        normalized = audio_data.astype(np.float32) / 32768.0
+                        rms = float(np.sqrt(np.mean(np.square(normalized))))
                         # Normalize to 0-1 range
                         with self._lock:
                             self.vu_level = min(1.0, peak / 32768.0)
+                            self.rms_level = min(1.0, rms)
                 except Exception as e:
                     print(f"Audio read error: {e}")
                     break
@@ -151,6 +156,11 @@ class AudioManager:
         """Get current VU meter level (0.0 - 1.0)"""
         with self._lock:
             return self.vu_level
+
+    def get_audio_levels(self) -> tuple[float, float]:
+        """Return peak and RMS levels for the active monitor."""
+        with self._lock:
+            return (self.vu_level, self.rms_level)
 
     def terminate(self):
         """Clean up resources"""

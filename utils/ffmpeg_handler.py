@@ -14,9 +14,11 @@ import queue
 import re
 import tempfile
 import platform
+import socket
 from typing import Optional, Dict, Callable, List
 from dataclasses import dataclass
 from config import FFMPEG_PATH, QUALITY_PRESETS, USE_HARDWARE_ENCODER
+from core.runtime.models import OutputMode, OutputSession, StreamSettings, StreamState
 from utils.logger import get_logger, log_ffmpeg_output, log_error, log_debug
 
 if platform.system() == "Windows":
@@ -90,6 +92,18 @@ class FFmpegHandler:
         self._last_progress: RecordingProgress = RecordingProgress()
         self._log_file = None
         self._safe_mode_active = False
+        self._output_mode = "record"
+        self._stream_settings: Optional[StreamSettings] = None
+        self._stream_process: Optional[subprocess.Popen] = None
+        self._stream_monitor_thread: Optional[threading.Thread] = None
+        self._stream_bridge_url: Optional[str] = None
+        self._stream_state = StreamState.DISABLED
+        self._stream_reconnect_attempts = 0
+        self._stream_reconnect_backoff_seconds = 0.0
+        self._stream_reconnect_policy = (1.0, 2.0, 5.0)
+        self._last_error = ""
+        self._stream_should_run = False
+        self._force_safe_mode_next_start = False
 
     def set_callbacks(self, on_started=None, on_stopped=None, on_error=None, on_progress=None, on_warning=None):
         """Set callback functions for async events"""
@@ -165,13 +179,16 @@ class FFmpegHandler:
 
     def get_best_encoder(self) -> str:
         """Get the best available encoder (prefer hardware)"""
-        if self._safe_mode_active or not USE_HARDWARE_ENCODER:
+        if self._force_safe_mode_next_start or self._safe_mode_active or not USE_HARDWARE_ENCODER:
             return "libx264"
         return self._encoder_candidates(0, 60)[0]
 
+    def set_force_safe_mode(self, enabled: bool):
+        self._force_safe_mode_next_start = enabled
+
     def start_recording(self, output_path: str, rect=None, mic=None, system=False,
                        scene_plan=None,
-                       framerate=60, quality_preset="balanced") -> bool:
+                       framerate=60, quality_preset="balanced", stream_settings: Optional[StreamSettings] = None) -> bool:
         """
         Start recording. Uses segment-based approach for reliable pause.
         Returns True if started successfully.
@@ -187,6 +204,12 @@ class FFmpegHandler:
         self._segment_index = 0
         self._final_output = output_path
         self._safe_mode_active = False
+        self._output_mode = "record_and_stream" if stream_settings and stream_settings.is_configured() else "record"
+        self._stream_settings = stream_settings
+        self._stream_state = StreamState.DISABLED
+        self._stream_reconnect_attempts = 0
+        self._stream_should_run = False
+        self._stream_bridge_url = self._allocate_stream_bridge_url()
         
         # Create temp directory for segments
         self._temp_dir = tempfile.mkdtemp(prefix="neorecorder_")
@@ -198,21 +221,89 @@ class FFmpegHandler:
             "system": system,
             "scene_plan": scene_plan,
             "framerate": framerate,
-            "quality_preset": quality_preset
+            "quality_preset": quality_preset,
+            "stream_settings": stream_settings,
         }
         
         self.start_timestamp = time.time()
         
         # Start first segment
         success = self._start_segment()
+        if success and stream_settings and stream_settings.is_configured():
+            if not self.start_stream_output(stream_settings):
+                if self._on_warning:
+                    self._on_warning("Recording started, but stream output failed to connect.")
         if success:
             return True
 
         self._cleanup_failed_start()
         return False
 
+    def start_streaming(
+        self,
+        stream_settings: StreamSettings,
+        rect=None,
+        mic=None,
+        system=False,
+        scene_plan=None,
+        framerate=60,
+        quality_preset="balanced",
+    ) -> bool:
+        if self._is_recording or not stream_settings.is_configured():
+            return False
+
+        self._stop_event.clear()
+        self._is_paused = False
+        self._total_pause_duration = 0.0
+        self._segments = []
+        self._segment_index = 0
+        self._final_output = None
+        self._safe_mode_active = False
+        self._output_mode = "stream"
+        self._stream_settings = stream_settings
+        self._stream_state = StreamState.DISABLED
+        self._stream_reconnect_attempts = 0
+        self._stream_should_run = False
+        self._stream_bridge_url = self._allocate_stream_bridge_url()
+        self._temp_dir = None
+        self._recording_params = {
+            "rect": rect,
+            "mic": mic,
+            "system": system,
+            "scene_plan": scene_plan,
+            "framerate": framerate,
+            "quality_preset": quality_preset,
+            "stream_settings": stream_settings,
+        }
+        self.start_timestamp = time.time()
+        success = self._try_ffmpeg(
+            None,
+            "gdigrab",
+            rect,
+            mic,
+            system,
+            scene_plan,
+            framerate,
+            quality_preset,
+            stream_settings=stream_settings,
+        )
+        if not success:
+            self._cleanup_failed_start()
+            return False
+
+        self._is_recording = True
+        if not self.start_stream_output(stream_settings):
+            self._cleanup_failed_start()
+            return False
+
+        self.current_output = stream_settings.output_url()
+        if self._on_started:
+            self._on_started()
+        return True
+
     def _cleanup_failed_start(self):
         """Reset state after a failed recording start"""
+        self.stop_stream_output()
         self._close_log_file()
         self._cleanup_temp()
         self.current_output = None
@@ -223,6 +314,13 @@ class FFmpegHandler:
         self._segments = []
         self._segment_index = 0
         self._is_recording = False
+        self._output_mode = "record"
+        self._stream_settings = None
+        self._stream_bridge_url = None
+        self._stream_state = StreamState.DISABLED
+        self._stream_reconnect_attempts = 0
+        self._stream_reconnect_backoff_seconds = 0.0
+        self._last_error = ""
 
     def _start_segment(self) -> bool:
         """Start a new recording segment"""
@@ -248,6 +346,7 @@ class FFmpegHandler:
             params.get("scene_plan"),
             params["framerate"],
             params["quality_preset"],
+            params.get("stream_settings"),
             False,
         )
         
@@ -285,7 +384,7 @@ class FFmpegHandler:
     
     def _try_ffmpeg(
         self,
-        output_path: str,
+        output_path: Optional[str],
         input_format: str,
         rect,
         mic,
@@ -293,12 +392,15 @@ class FFmpegHandler:
         scene_plan,
         framerate,
         quality_preset,
+        stream_settings=None,
         probe_resolution=True,
     ) -> bool:
         """Build and execute FFmpeg command with proper resource management"""
         quality = QUALITY_PRESETS.get(quality_preset, QUALITY_PRESETS["balanced"])
         decision = self._build_encoder_decision(input_format, rect, framerate, probe_resolution)
         tried_hardware = False
+        if self._force_safe_mode_next_start:
+            self._safe_mode_active = True
 
         for encoder in self._encoder_chain(decision):
             safe_mode = encoder == "libx264" and tried_hardware
@@ -315,6 +417,7 @@ class FFmpegHandler:
                 decision.safe_framerate,
                 quality,
                 encoder,
+                stream_settings=stream_settings,
                 safe_mode=safe_mode,
             )
             if self._launch_ffmpeg(
@@ -326,13 +429,18 @@ class FFmpegHandler:
                 quality_preset,
                 decision.capture_width,
             ):
+                self._force_safe_mode_next_start = False
+                self._last_error = ""
                 return True
             tried_hardware = tried_hardware or encoder != "libx264"
 
         self.current_encoder = None
+        self._last_error = "Failed to launch ffmpeg output"
         return False
 
     def _encoder_chain(self, decision: EncoderDecision) -> List[str]:
+        if self._force_safe_mode_next_start:
+            return ["libx264"]
         best = self.get_best_encoder()
         if best != "libx264" and self._is_encoder_compatible(best, decision.capture_width, decision.safe_framerate):
             return [best, "libx264"]
@@ -421,6 +529,7 @@ class FFmpegHandler:
         framerate,
         quality,
         encoder,
+        stream_settings=None,
         safe_mode=False,
     ):
         capture_rects = self._capture_rects(rect, scene_plan)
@@ -433,8 +542,122 @@ class FFmpegHandler:
         cmd.extend(["-c:v", encoder])
         selected_quality = QUALITY_PRESETS["ultrafast"] if safe_mode and encoder == "libx264" else quality
         cmd.extend(self._video_args(encoder, selected_quality))
-        cmd.extend(["-pix_fmt", "yuv420p", "-vsync", "cfr", output_path])
+        cmd.extend(["-pix_fmt", "yuv420p", "-vsync", "cfr"])
+        cmd.extend(self._output_args(output_path, stream_settings))
         return cmd
+
+    def _output_args(self, output_path, stream_settings: Optional[StreamSettings]):
+        if output_path and self._stream_bridge_url:
+            return ["-f", "tee", self._tee_output_spec(output_path, self._stream_bridge_url)]
+        if output_path:
+            return [output_path]
+        if self._stream_bridge_url:
+            return ["-f", "mpegts", self._stream_bridge_url]
+        if stream_settings and stream_settings.is_configured():
+            return ["-f", "flv", stream_settings.output_url()]
+        return [output_path]
+
+    @staticmethod
+    def _tee_output_spec(output_path: str, stream_url: str) -> str:
+        safe_path = output_path.replace("|", "\\|")
+        return f"[f=mp4]{safe_path}|[f=mpegts:onfail=ignore]{stream_url}"
+
+    def _allocate_stream_bridge_url(self) -> str:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        return f"udp://127.0.0.1:{port}?pkt_size=1316"
+
+    def start_stream_output(self, stream_settings: StreamSettings) -> bool:
+        if not self._is_recording or not stream_settings.is_configured() or not self._stream_bridge_url:
+            return False
+        if self._stream_process and self._stream_process.poll() is None:
+            return True
+        self._stream_settings = stream_settings
+        self._stream_should_run = True
+        self._stream_state = StreamState.STARTING
+        self._stream_reconnect_backoff_seconds = 0.0
+        command = self._build_stream_command(stream_settings)
+        try:
+            self._stream_process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=CREATION_FLAGS,
+            )
+        except Exception as exc:
+            self._stream_process = None
+            self._stream_state = StreamState.FAILED
+            self._last_error = f"Failed to start stream output: {exc}"
+            if self._on_error:
+                self._on_error(self._last_error)
+            return False
+
+        if self._stream_process.poll() not in (None, 0):
+            self._stream_process = None
+            self._stream_state = StreamState.FAILED
+            self._last_error = "Stream bridge exited immediately"
+            return False
+
+        self._stream_state = StreamState.LIVE
+        self._last_error = ""
+        self._start_stream_monitor()
+        return True
+
+    def stop_stream_output(self) -> bool:
+        self._stream_should_run = False
+        stopped = self._stop_process(self._stream_process)
+        self._stream_process = None
+        if self._stream_state != StreamState.DISABLED:
+            self._stream_state = StreamState.STOPPED
+        self._stream_reconnect_backoff_seconds = 0.0
+        return stopped
+
+    def is_streaming(self) -> bool:
+        return self._stream_process is not None and self._stream_process.poll() is None
+
+    def get_output_session(self) -> OutputSession:
+        mode = OutputMode.IDLE
+        if self._output_mode == "stream" and self._is_recording:
+            mode = OutputMode.STREAM
+        elif self._is_recording and self.is_streaming():
+            mode = OutputMode.RECORD_AND_STREAM
+        elif self._is_recording:
+            mode = OutputMode.RECORD
+        return OutputSession(
+            mode=mode,
+            record_path=self._final_output,
+            bridge_url=self._stream_bridge_url,
+            stream_state=self._stream_state,
+            stream_url=self._stream_settings.output_url() if self._stream_settings and self._stream_settings.is_configured() else None,
+            reconnect_attempts=self._stream_reconnect_attempts,
+            reconnect_backoff_seconds=self._stream_reconnect_backoff_seconds,
+            last_error=self._last_error,
+            software_fallback_active=self._safe_mode_active or self._force_safe_mode_next_start,
+        )
+
+    def _build_stream_command(self, stream_settings: StreamSettings) -> list[str]:
+        input_url = self._stream_bridge_input_url()
+        return [
+            FFMPEG_PATH,
+            "-y",
+            "-fflags",
+            "nobuffer",
+            "-flags",
+            "low_delay",
+            "-i",
+            input_url,
+            "-c",
+            "copy",
+            "-f",
+            "flv",
+            stream_settings.output_url(),
+        ]
+
+    def _stream_bridge_input_url(self) -> str:
+        base = (self._stream_bridge_url or "").split("?", 1)[0]
+        return f"{base}?fifo_size=1000000&overrun_nonfatal=1"
 
     @staticmethod
     def _capture_rects(rect, scene_plan):
@@ -507,7 +730,7 @@ class FFmpegHandler:
 
     @staticmethod
     def _overlay_layers(scene_plan):
-        return [layer for layer in scene_plan.overlays if layer.rect]
+        return [layer for layer in scene_plan.overlays if layer.rect and getattr(layer, "supported", True)]
 
     @staticmethod
     def _overlay_prepare(index, opacity, overlay_name):
@@ -576,7 +799,7 @@ class FFmpegHandler:
         return True
 
     def _open_log_file(self, output_path, encoder, framerate, safe_framerate, quality_preset, capture_width, cmd):
-        log_path = output_path + ".log"
+        log_path = self._resolve_log_path(output_path)
         try:
             self._log_file = open(log_path, "w", encoding="utf-8")
             self._log_file.write(f"Encoder: {encoder}\n")
@@ -589,6 +812,71 @@ class FFmpegHandler:
         except Exception as e:
             print(f"Failed to create log file: {e}")
             self._log_file = None
+
+    def _resolve_log_path(self, output_path: Optional[str]) -> str:
+        if output_path:
+            return output_path + ".log"
+        log_dir = self._temp_dir or tempfile.gettempdir()
+        return os.path.join(log_dir, "neorecorder_stream.log")
+
+    def _start_stream_monitor(self):
+        def monitor():
+            process = self._stream_process
+            if process is None:
+                return
+            while process.poll() is None:
+                try:
+                    line = process.stderr.readline()
+                    if not line:
+                        continue
+                except Exception:
+                    break
+            if not self._stream_should_run:
+                return
+            returncode = process.returncode
+            if returncode in (None, 0):
+                return
+            self._stream_process = None
+            self._last_error = f"Stream output exited with code {returncode}"
+            if self._stream_reconnect_attempts >= len(self._stream_reconnect_policy) or not self._stream_settings:
+                self._stream_state = StreamState.FAILED
+                if self._on_error:
+                    self._on_error(self._last_error)
+                return
+            self._stream_reconnect_attempts += 1
+            self._stream_state = StreamState.RECONNECTING
+            self._stream_reconnect_backoff_seconds = self._stream_reconnect_policy[self._stream_reconnect_attempts - 1]
+            if self._on_warning:
+                self._on_warning(
+                    f"Stream reconnect attempt {self._stream_reconnect_attempts} in {self._stream_reconnect_backoff_seconds:.0f}s"
+                )
+            time.sleep(self._stream_reconnect_backoff_seconds)
+            self.start_stream_output(self._stream_settings)
+
+        self._stream_monitor_thread = threading.Thread(target=monitor, daemon=True)
+        self._stream_monitor_thread.start()
+
+    @staticmethod
+    def _stop_process(process: Optional[subprocess.Popen]) -> bool:
+        if process is None:
+            return False
+        try:
+            if process.stdin:
+                process.stdin.write(b"q")
+                process.stdin.flush()
+            process.wait(timeout=5)
+            return True
+        except Exception:
+            try:
+                process.terminate()
+                process.wait(timeout=3)
+                return True
+            except Exception:
+                try:
+                    process.kill()
+                    return True
+                except Exception:
+                    return False
 
     def _start_output_monitor(self):
         """Start thread to monitor FFmpeg output and parse progress"""
@@ -685,7 +973,7 @@ class FFmpegHandler:
         Pause recording by cleanly stopping current segment.
         Much more reliable than NtSuspendProcess.
         """
-        if not self._is_recording or self._is_paused or not self.process:
+        if self.is_streaming() or self._output_mode == "stream" or not self._is_recording or self._is_paused or not self.process:
             return False
         
         # Stop current segment gracefully
@@ -711,7 +999,7 @@ class FFmpegHandler:
 
     def resume(self) -> bool:
         """Resume recording by starting a new segment"""
-        if not self._is_recording or not self._is_paused:
+        if self.is_streaming() or self._output_mode == "stream" or not self._is_recording or not self._is_paused:
             return False
         
         self._is_paused = False
@@ -750,28 +1038,18 @@ class FFmpegHandler:
         duration = 0
         if self.start_timestamp:
             duration = time.time() - self.start_timestamp - self._total_pause_duration
+
+        self.stop_stream_output()
         
         # If paused, no need to stop process (already stopped)
         if not self._is_paused and self.process:
-            try:
-                self.process.stdin.write(b"q")
-                self.process.stdin.flush()
-                self.process.wait(timeout=10)
-            except Exception:
-                try:
-                    self.process.terminate()
-                    self.process.wait(timeout=5)
-                except:
-                    try:
-                        self.process.kill()
-                    except:
-                        pass
+            self._stop_process(self.process)
             self.process = None
         
         self._close_log_file()
         
         # Merge segments if multiple exist
-        final_path = self._merge_segments()
+        final_path = self._merge_segments() if self._output_mode != "stream" else None
         
         # Cleanup temp directory
         self._cleanup_temp()
@@ -801,12 +1079,17 @@ class FFmpegHandler:
         self._segments = []
         self._segment_index = 0
         self._last_progress = RecordingProgress()
-        
+        self._output_mode = "record"
+        self._stream_settings = None
+        self._stream_bridge_url = None
+        self._stream_state = StreamState.DISABLED
+        self._stream_reconnect_attempts = 0
+
         return result
 
     def _merge_segments(self) -> Optional[str]:
         """Merge all segments into final output file"""
-        if not self._segments:
+        if not self._segments or not self._final_output:
             return None
         
         # Filter existing segments

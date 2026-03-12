@@ -77,6 +77,7 @@ def test_settings_loads_defaults_when_file_missing(fresh_import, monkeypatch, tm
 
     assert config.settings.get("fps") == config.DEFAULT_FPS
     assert config.settings.get_hotkey("quick_overlay") == "ctrl+shift+s"
+    assert str(config.OUTPUT_SESSION_REPORT_FILE).endswith("runtime\\last_output_session.json")
 
 
 def test_settings_merges_saved_values(fresh_import, monkeypatch, tmp_path):
